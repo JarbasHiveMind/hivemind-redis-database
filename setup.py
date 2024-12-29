@@ -39,6 +39,7 @@ def required(requirements_file):
                 if pkg.strip() and not pkg.startswith("#")]
 
 
+PLUGIN_ENTRY_POINT = 'hivemind-redis-db-plugin=hivemind_redis_database:RedisDB'
 
 setup(
     name='hivemind-redis-database',
@@ -48,6 +49,7 @@ setup(
     license='Apache-2.0',
     author='jarbasAi',
     install_requires=required("requirements.txt"),
+    entry_points={'hivemind.database': PLUGIN_ENTRY_POINT},
     author_email='jarbasai@mailfence.com',
     description='redis database plugin for hivemind-core'
 )
