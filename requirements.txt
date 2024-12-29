@@ -1,1 +1,2 @@
 py-redis
+hivemind-plugin-manager>=0.1.0,<1.0.0
