@@ -1,25 +1,28 @@
+from dataclasses import dataclass
 from typing import List, Union, Optional, Iterable
 
 import redis
 from ovos_utils.log import LOG
 
-from hivemind_plugin_manager.database import Client, AbstractDB, cast2client
+from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2client
 
 
-class RedisDB(AbstractDB):
+@dataclass
+class RedisDB(AbstractRemoteDB):
     """Database implementation using Redis with RediSearch support."""
+    host: str = "127.0.0.1"
+    port: int = 6379
+    name: str = "clients"
+    subfolder: str = "hivemind-core"
+    password: Optional[str] = None
+    database_id: Optional[int] = None
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: Optional[str] = None, redis_db: int = 0):
+    def __post_init__(self):
         """
         Initialize the RedisDB connection.
-
-        Args:
-            host: Redis server host.
-            port: Redis server port.
-            redis_db: Redis database index.
         """
-        self.redis = redis.StrictRedis(host=host, port=port, db=redis_db,
-                                       password=password if password else None,
+        self.redis = redis.StrictRedis(host=self.host, port=self.port, db=self.database_id,
+                                       password=self.password if self.password else None,
                                        decode_responses=True)
         # TODO - support for a proper search index
 
