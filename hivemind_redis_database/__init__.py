@@ -9,15 +9,6 @@ from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2clie
 
 @dataclass
 class RedisDB(AbstractRemoteDB):
-    """
-    Redis database implementation for HiveMind with RediSearch support.
-
-    Features:
-        - Automatic Redis vs Redis Cluster detection
-        - RediSearch integration with fallback to basic indexing
-        - Connection pooling and performance monitoring
-        - Production-ready error handling and logging
-    """
     host: str = "127.0.0.1"
     port: int = 6379
     name: str = "clients"
@@ -27,7 +18,6 @@ class RedisDB(AbstractRemoteDB):
     cluster_nodes: Optional[List[dict]] = None
     index_prefix: str = "client"
     max_connections: int = 5
-    ssl: bool = False
     retry_attempts: int = 3
     retry_delay: float = 0.1
 
@@ -193,7 +183,6 @@ class RedisDB(AbstractRemoteDB):
         """
         try:
             index_name = f"{self.index_prefix}_search_index"
-            # Index minimal per-client hashes under clientidx:{id}
             self.redis.execute_command(
                 "FT.CREATE", index_name,
                 "ON", "HASH",
@@ -211,8 +200,39 @@ class RedisDB(AbstractRemoteDB):
         except Exception as e:
             LOG.warning(f"Error setting up RediSearch index: {e}")
 
+    def _get_next_client_id(self) -> int:
+        """
+        Generate the next sequential client ID.
+
+        Returns:
+            The next available client ID
+        """
+        max_id = 0
+        for client_key in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
+            try:
+                key_parts = client_key.split(":")
+                if len(key_parts) >= 3:
+                    client_id = int(key_parts[-1])
+                    max_id = max(max_id, client_id)
+            except (ValueError, IndexError):
+                continue
+        return max_id + 1
+
     def add_item(self, client: Client) -> bool:
         try:
+            if not hasattr(client, 'client_id') or client.client_id is None:
+                client.client_id = self._get_next_client_id()
+            elif isinstance(client.client_id, str):
+                try:
+                    client.client_id = int(client.client_id)
+                except ValueError:
+                    client.client_id = self._get_next_client_id()
+            elif not isinstance(client.client_id, int):
+                client.client_id = self._get_next_client_id()
+
+            while self.redis.exists(f"{self.index_prefix}:client:{client.client_id}"):
+                client.client_id = self._get_next_client_id()
+
             p = self.redis.pipeline()
             p.set(f"{self.index_prefix}:client:{client.client_id}", client.serialize())
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
@@ -221,7 +241,7 @@ class RedisDB(AbstractRemoteDB):
             p.execute()
             return True
         except Exception as e:
-            LOG.error(f"Failed to add client '{client.client_id}': {e}")
+            LOG.error(f"Failed to add client: {e}")
             return False
 
     def remove_client(self, client_id: str) -> bool:
@@ -448,42 +468,6 @@ class RedisDB(AbstractRemoteDB):
                 self.redis_pool.disconnect()
         except Exception as e:
             LOG.error(f"Error during Redis pool cleanup: {e}")
-
-
-    def get_connection_stats(self) -> dict:
-        """
-        Get connection pool statistics for monitoring.
-
-        Returns:
-            Dictionary containing connection pool statistics
-        """
-        try:
-            stats = {
-                'is_cluster': self.is_cluster,
-                'max_connections': self.max_connections,
-                'host': self.host,
-                'port': self.port,
-                'db': self.db if not self.is_cluster else None,
-                'redisearch_available': self.redisearch_available
-            }
-
-            if not self.is_cluster and hasattr(self, 'redis_pool'):
-                stats.update({
-                    'connections_in_pool': len(self.redis_pool._available_connections),
-                    'connections_in_use': len(self.redis_pool._in_use_connections),
-                    'pool_size': self.redis_pool._created_connections,
-                })
-
-            try:
-                info = self.redis.info('server')
-                stats['redis_version'] = info.get('redis_version')
-                stats['uptime_in_seconds'] = info.get('uptime_in_seconds')
-            except Exception:
-                pass
-            return stats
-        except Exception as e:
-            LOG.warning(f"Failed to get connection stats: {e}")
-            return {}
 
     def health_check(self) -> bool:
         """
