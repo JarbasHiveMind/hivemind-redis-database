@@ -256,7 +256,12 @@ class RedisDB(AbstractRemoteDB):
             return False
 
     def _ensure_client_attributes(self, client: Client):
-        """Ensure client has required attributes initialized."""
+        """
+        Ensure client has required attributes initialized.
+
+        Args:
+            client: The client object to initialize attributes for
+        """
         for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
             if not hasattr(client, attr) or getattr(client, attr) is None:
                 setattr(client, attr, [])
@@ -289,7 +294,16 @@ class RedisDB(AbstractRemoteDB):
             return False
 
     def _search_with_redisearch(self, key: str, val: str) -> List[Client]:
-        """Search using RediSearch if available."""
+        """
+        Search using RediSearch if available.
+
+        Args:
+            key: The field to search by
+            val: The value to search for
+
+        Returns:
+            List of matching clients
+        """
         try:
             index_name = f"{self.name}_search_index"
             query = f"@{key}:{val}"
@@ -312,7 +326,16 @@ class RedisDB(AbstractRemoteDB):
             return []
 
     def _search_with_index(self, key: str, val: str) -> List[Client]:
-        """Search using Redis sets for indexed fields."""
+        """
+        Search using Redis sets for indexed fields.
+
+        Args:
+            key: The field to search by
+            val: The value to search for
+
+        Returns:
+            List of matching clients
+        """
         LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
         client_ids = self.redis.smembers(f"{self.index_prefix}:{key}:{val}")
         res = []
@@ -329,7 +352,16 @@ class RedisDB(AbstractRemoteDB):
         return res
 
     def _search_brute_force(self, key: str, val) -> List[Client]:
-        """Fallback search by scanning all clients."""
+        """
+        Fallback search by scanning all clients.
+
+        Args:
+            key: The field to search by
+            val: The value to search for
+
+        Returns:
+            List of matching clients
+        """
         res = []
         for client_id in self.redis.scan_iter("client:*"):
             if client_id.startswith(f"{self.index_prefix}:"):
