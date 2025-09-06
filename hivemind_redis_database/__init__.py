@@ -36,6 +36,12 @@ class RedisDB(AbstractRemoteDB):
         max_connections (int): Maximum connection pool size (default: 5)
         retry_attempts (int): Number of retry attempts (default: 3)
         retry_delay (float): Delay between retry attempts in seconds (default: 0.1)
+        ssl (bool): Enable SSL/TLS connection (default: False)
+        ssl_certfile (Optional[str]): Path to SSL certificate file
+        ssl_keyfile (Optional[str]): Path to SSL private key file
+        ssl_ca_certs (Optional[str]): Path to CA certificates file
+        ssl_cert_reqs (str): SSL certificate requirements ("required", "optional", "none") (default: "required")
+        ssl_check_hostname (bool): Verify SSL hostname (default: True)
     """
     host: str = "127.0.0.1"
     port: int = 6379
@@ -48,6 +54,12 @@ class RedisDB(AbstractRemoteDB):
     max_connections: int = 5
     retry_attempts: int = 3
     retry_delay: float = 0.1
+    ssl: bool = False
+    ssl_certfile: Optional[str] = None
+    ssl_keyfile: Optional[str] = None
+    ssl_ca_certs: Optional[str] = None
+    ssl_cert_reqs: str = "required"
+    ssl_check_hostname: bool = True
 
 
     def __post_init__(self):
@@ -106,6 +118,9 @@ class RedisDB(AbstractRemoteDB):
         if self.password and not isinstance(self.password, str):
             raise ValueError(f"Password must be a string, got {type(self.password)}")
 
+        if self.ssl_cert_reqs not in ["required", "optional", "none"]:
+            raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
+
     def _detect_cluster(self) -> bool:
         """
         Detect if Redis is running in cluster mode.
@@ -117,6 +132,17 @@ class RedisDB(AbstractRemoteDB):
             return True
 
         try:
+            ssl_context = None
+            if self.ssl:
+                import ssl
+                ssl_context = ssl.create_default_context()
+                if self.ssl_ca_certs:
+                    ssl_context.load_verify_locations(self.ssl_ca_certs)
+                if self.ssl_certfile and self.ssl_keyfile:
+                    ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
+                ssl_context.check_hostname = self.ssl_check_hostname
+                ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+
             test_client = redis.StrictRedis(
                 host=self.host,
                 port=self.port,
@@ -124,7 +150,9 @@ class RedisDB(AbstractRemoteDB):
                 username=self.username,
                 db=0,
                 socket_connect_timeout=2,
-                socket_timeout=2
+                socket_timeout=2,
+                ssl=self.ssl,
+                ssl_context=ssl_context if self.ssl else None
             )
             test_client.ping()
 
@@ -144,19 +172,38 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             Redis client instance
         """
+        connection_kwargs = {
+            'host': self.host,
+            'port': self.port,
+            'db': self.db,
+            'password': self.password if self.password else None,
+            'username': self.username,
+            'decode_responses': True,
+            'socket_connect_timeout': 5,
+            'socket_timeout': 5,
+            'health_check_interval': 30,
+        }
+
+        if self.ssl:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            if self.ssl_ca_certs:
+                ssl_context.load_verify_locations(self.ssl_ca_certs)
+            if self.ssl_certfile and self.ssl_keyfile:
+                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
+            ssl_context.check_hostname = self.ssl_check_hostname
+            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+
+            connection_kwargs.update({
+                'ssl': True,
+                'ssl_context': ssl_context,
+            })
+
         self.redis_pool = redis.ConnectionPool(
-            host=self.host,
-            port=self.port,
-            db=self.db,
-            password=self.password if self.password else None,
-            username=self.username,
-            decode_responses=True,
             max_connections=self.max_connections,
             retry_on_timeout=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            health_check_interval=30,
-            retry_on_error=[redis.ConnectionError, redis.TimeoutError]
+            retry_on_error=[redis.ConnectionError, redis.TimeoutError],
+            **connection_kwargs
         )
         return redis.StrictRedis(connection_pool=self.redis_pool)
 
@@ -172,6 +219,17 @@ class RedisDB(AbstractRemoteDB):
         else:
             startup_nodes = [{"host": self.host, "port": self.port}]
 
+        ssl_context = None
+        if self.ssl:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            if self.ssl_ca_certs:
+                ssl_context.load_verify_locations(self.ssl_ca_certs)
+            if self.ssl_certfile and self.ssl_keyfile:
+                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
+            ssl_context.check_hostname = self.ssl_check_hostname
+            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+
         try:
             return redis.RedisCluster(
                 startup_nodes=startup_nodes,
@@ -182,7 +240,9 @@ class RedisDB(AbstractRemoteDB):
                 socket_timeout=5,
                 retry_on_timeout=True,
                 max_connections=self.max_connections,
-                skip_full_coverage_check=True
+                skip_full_coverage_check=True,
+                ssl=self.ssl,
+                ssl_context=ssl_context if self.ssl else None
             )
         except Exception as e:
             LOG.warning(f"Failed to create cluster connection: {e}")
