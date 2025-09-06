@@ -1,6 +1,6 @@
 # HiveMind Redis Database
 
-Redis database plugin for HiveMind with RediSearch support. Automatically detects and supports both single Redis instances and Redis Clusters.
+Redis database plugin for HiveMind with consistent indexing, RediSearch support, and production-ready features.
 
 ## Installation
 
@@ -10,66 +10,66 @@ pip install hivemind-redis-database
 
 ## Configuration
 
-### Single Redis Instance
+Add to your `server.json` configuration file:
 
-Add to your `server.json`:
+### Single Redis Instance
 
 ```json
 {
   "database": {
-    "module": "hivemind-redis-db-plugin",
-    "hivemind-redis-db-plugin": {
-      "host": "127.0.0.1",
-      "port": 6379,
-      "db": 0
-    }
+    "module": "hivemind_redis_database",
+    "host": "127.0.0.1",
+    "port": 6379,
+    "db": 0,
+    "password": "your_password",
+    "max_connections": 10
   }
 }
 ```
 
 ### Redis Cluster
 
-For Redis Cluster, specify cluster nodes:
-
 ```json
 {
   "database": {
-    "module": "hivemind-redis-db-plugin",
-    "hivemind-redis-db-plugin": {
-      "cluster_nodes": [
-        {"host": "redis-node1", "port": 6379},
-        {"host": "redis-node2", "port": 6380},
-        {"host": "redis-node3", "port": 6381}
-      ]
-    }
+    "module": "hivemind_redis_database",
+    "cluster_nodes": [
+      {"host": "redis-node1", "port": 6379},
+      {"host": "redis-node2", "port": 6380},
+      {"host": "redis-node3", "port": 6381}
+    ],
+    "password": "your_password",
+    "max_connections": 20
   }
 }
 ```
 
+### Configuration Parameters
+
+- `host`: Redis server hostname (default: "127.0.0.1")
+- `port`: Redis server port (default: 6379)
+- `db`: Redis database number (default: 0)
+- `password`: Redis password for authentication
+- `username`: Redis username for ACL authentication (default: "default")
+- `cluster_nodes`: List of cluster nodes (for Redis Cluster mode)
+- `max_connections`: Maximum connection pool size (default: 5)
+- `index_prefix`: Prefix for index keys (default: "client:index")
+
 ## Usage
-
-### Automatic Detection
-
-The plugin automatically detects Redis type:
 
 ```python
 from hivemind_redis_database import RedisDB
 
-# Single instance
-db = RedisDB(host="127.0.0.1", port=6379, db=0)
+# Using configuration from server.json
+db = RedisDB()
 
-# Cluster (auto-detected)
-db = RedisDB(cluster_nodes=[
-    {"host": "node1", "port": 6379},
-    {"host": "node2", "port": 6380}
-])
+# Or manual configuration
+db = RedisDB(host="127.0.0.1", port=6379, password="your_password")
 ```
 
-### Manual Configuration
+## Features
 
-```python
-# Force cluster mode
-db = RedisDB(
-    cluster_nodes=[{"host": "cluster-node", "port": 6379}]
-)
-```
+- ✅ **Auto-Detection**: Redis vs Redis Cluster
+- ✅ **RediSearch Support**: Advanced search with fallback
+- ✅ **Connection Pooling**: Efficient resource management
+- ✅ **Health Checks**: Automatic connection validation

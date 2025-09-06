@@ -10,33 +10,13 @@ from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2clie
 @dataclass
 class RedisDB(AbstractRemoteDB):
     """
-    Advanced Redis database implementation with RediSearch support for HiveMind.
-
-    This class provides a robust, production-ready Redis-backed database for storing and
-    retrieving Client objects with the following features:
+    Redis database implementation for HiveMind with RediSearch support.
 
     Features:
-        - Redis ACL authentication support
-        - Optional RediSearch integration with automatic index creation and graceful fallback
-        - Configurable connection pooling with performance monitoring
-        - Comprehensive input validation and error handling
-        - Performance optimizations (MGET, pipelining, client counter)
-        - Resource cleanup and connection monitoring
-        - Structured logging throughout operations
-        - Exponential backoff for retries
-
-    Attributes:
-        host (str): Redis server hostname. Defaults to "127.0.0.1".
-        port (int): Redis server port (1-65535). Defaults to 6379.
-        name (str): Database name identifier. Defaults to "clients".
-        password (Optional[str]): Redis password for authentication. Defaults to None.
-        username (Optional[str]): Redis username for ACL authentication. Defaults to "default".
-        db (Optional[int]): Redis database number (0+). Defaults to 0.
-        index_prefix (str): Prefix for index keys. Defaults to "client:index".
-        max_connections (int): Maximum connection pool size. Defaults to 5.
-        ssl (bool): Enable SSL/TLS connections. Defaults to False.
-        retry_attempts (int): Number of retry attempts for failed operations. Defaults to 3.
-        retry_delay (float): Base delay between retries in seconds. Defaults to 0.1.
+        - Automatic Redis vs Redis Cluster detection
+        - RediSearch integration with fallback to basic indexing
+        - Connection pooling and performance monitoring
+        - Production-ready error handling and logging
     """
     host: str = "127.0.0.1"
     port: int = 6379
@@ -50,6 +30,7 @@ class RedisDB(AbstractRemoteDB):
     ssl: bool = False
     retry_attempts: int = 3
     retry_delay: float = 0.1
+
 
     def __post_init__(self):
         """
@@ -77,6 +58,10 @@ class RedisDB(AbstractRemoteDB):
             LOG.info("RediSearch module detected, enabling advanced search features")
         else:
             LOG.info("RediSearch module not available, using basic indexing")
+
+        if not self.health_check():
+            LOG.error("Redis connection health check failed during initialization")
+            raise redis.ConnectionError("Failed to establish healthy Redis connection")
 
     def _validate_parameters(self):
         """
@@ -185,9 +170,7 @@ class RedisDB(AbstractRemoteDB):
             LOG.warning(f"Failed to create cluster connection: {e}")
             raise
 
-    def _get_index_prefix(self) -> str:
-        """Get the full index prefix for keys."""
-        return f"{self.index_prefix}:"
+
 
     def _check_redisearch_availability(self) -> bool:
         """
@@ -197,14 +180,11 @@ class RedisDB(AbstractRemoteDB):
             True if RediSearch is available, False otherwise.
         """
         try:
-            # Try to execute a simple RediSearch command
             self.redis.ft("test_index").info()
             return True
         except redis.ResponseError:
-            # RediSearch module not loaded
             return False
-        except Exception as e:
-            LOG.debug(f"Error checking RediSearch availability: {e}")
+        except Exception:
             return False
 
     def _setup_redisearch_index(self):
@@ -225,33 +205,14 @@ class RedisDB(AbstractRemoteDB):
             LOG.warning(f"Error setting up RediSearch index: {e}")
 
     def add_item(self, client: Client) -> bool:
-        """
-        Add a client to Redis and RediSearch.
-
-        Args:
-            client: The client to be added.
-
-        Returns:
-            True if the addition was successful, False otherwise.
-        """
-        item_key = f"client:{client.client_id}"
-        serialized_data: str = client.serialize()
-        counter_key = f"{self.name}:count"
         try:
-            self.redis.set(item_key, serialized_data)
-            self.redis.sadd(f"{self.index_prefix}:name:{client.name}", client.client_id)
-            self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", client.client_id)
-            self.redis.incr(counter_key)
-            LOG.debug(f"Successfully added client '{client.client_id}'")
+            self.redis.set(f"client:{client.client_id}", client.serialize())
+            self.redis.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
+            self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            self.redis.incr(f"{self.name}:count")
             return True
-        except redis.ConnectionError as e:
-            LOG.error(f"Redis connection error while adding client '{client.client_id}': {e}")
-            return False
-        except redis.TimeoutError as e:
-            LOG.error(f"Redis timeout error while adding client '{client.client_id}': {e}")
-            return False
         except Exception as e:
-            LOG.error(f"Unexpected error while adding client '{client.client_id}': {e}")
+            LOG.error(f"Failed to add client '{client.client_id}': {e}")
             return False
 
     def remove_client(self, client_id: str) -> bool:
@@ -277,8 +238,8 @@ class RedisDB(AbstractRemoteDB):
 
             try:
                 client = cast2client(client_data)
-                self.redis.srem(f"{self.index_prefix}:name:{client.name}", client_id)
-                self.redis.srem(f"{self.index_prefix}:api_key:{client.api_key}", client_id)
+                self.redis.srem(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
+                self.redis.srem(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
             except Exception as e:
                 LOG.warning(f"Failed to deserialize client data for index cleanup: {e}")
 
@@ -294,107 +255,81 @@ class RedisDB(AbstractRemoteDB):
             LOG.error(f"Unexpected error while removing client '{client_id}': {e}")
             return False
 
+    def _ensure_client_attributes(self, client: Client):
+        """Ensure client has required attributes initialized."""
+        for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
+            if not hasattr(client, attr) or getattr(client, attr) is None:
+                setattr(client, attr, [])
+
     def update_client(self, client: Client) -> bool:
-        """
-        Update an existing client in Redis and update indices.
-
-        Args:
-            client: The updated client object.
-
-        Returns:
-            True if the update was successful, False otherwise.
-        """
         try:
             item_key = f"client:{client.client_id}"
+
             old_client_data = self.redis.get(item_key)
             if not old_client_data:
                 LOG.warning(f"Client '{client.client_id}' not found for update")
                 return False
 
             old_client = cast2client(old_client_data)
+            self._ensure_client_attributes(client)
 
-            if not hasattr(client, 'message_blacklist') or client.message_blacklist is None:
-                client.message_blacklist = []
-            if not hasattr(client, 'intent_blacklist') or client.intent_blacklist is None:
-                client.intent_blacklist = []
-            if not hasattr(client, 'skill_blacklist') or client.skill_blacklist is None:
-                client.skill_blacklist = []
-
-            serialized_data = client.serialize()
-            self.redis.set(item_key, serialized_data)
+            self.redis.set(item_key, client.serialize())
 
             if old_client.name != client.name:
-                self.redis.srem(f"{self.index_prefix}:name:{old_client.name}", client.client_id)
-                self.redis.sadd(f"{self.index_prefix}:name:{client.name}", client.client_id)
-                LOG.debug(f"Updated name index for client '{client.client_id}' from '{old_client.name}' to '{client.name}'")
+                self.redis.srem(f"{self.index_prefix}:name:{old_client.name}", str(old_client.client_id))
+                self.redis.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
 
             if old_client.api_key != client.api_key:
-                self.redis.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", client.client_id)
-                self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", client.client_id)
-                LOG.debug(f"Updated api_key index for client '{client.client_id}'")
+                self.redis.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(old_client.client_id))
+                self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
 
-            LOG.info(f"Successfully updated client '{client.client_id}'")
             return True
-        except redis.ConnectionError as e:
-            LOG.error(f"Redis connection error while updating client '{client.client_id}': {e}")
-            return False
-        except redis.TimeoutError as e:
-            LOG.error(f"Redis timeout error while updating client '{client.client_id}': {e}")
-            return False
         except Exception as e:
-            LOG.error(f"Unexpected error while updating client '{client.client_id}': {e}")
+            LOG.error(f"Failed to update client '{client.client_id}': {e}")
             return False
 
-    def search_by_value(self, key: str, val) -> List[Client]:
-        """
-        Search for clients by a specific key-value pair in Redis.
-
-        Args:
-            key: The key to search by.
-            val: The value to search for.
-
-        Returns:
-            A list of clients that match the search criteria.
-        """
-        if self.redisearch_available and key in ['name', 'api_key']:
-            try:
-                index_name = f"{self.name}_search_index"
-                query = f"@{key}:{val}"
-                results = self.redis.execute_command("FT.SEARCH", index_name, query)
-                res = []
-                if results and len(results) > 1:
-                    for i in range(1, len(results), 2):
-                        client_key = results[i]
-                        if client_key.startswith("client:"):
-                            client_data = self.redis.get(client_key)
-                            if client_data:
-                                try:
-                                    client = cast2client(client_data)
-                                    if client.api_key != "revoked":
-                                        res.append(client)
-                                except Exception as e:
-                                    LOG.warning(f"Failed to deserialize client data: {e}")
-                LOG.debug(f"RediSearch found {len(res)} clients matching '{key}={val}'")
-                return res
-            except Exception as e:
-                LOG.debug(f"RediSearch query failed, falling back to basic search: {e}")
-
-        if key in ['name', 'api_key']:
-            LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
-            client_ids = self.redis.smembers(f"{self.index_prefix}:{key}:{val}")
+    def _search_with_redisearch(self, key: str, val: str) -> List[Client]:
+        """Search using RediSearch if available."""
+        try:
+            index_name = f"{self.name}_search_index"
+            query = f"@{key}:{val}"
+            results = self.redis.execute_command("FT.SEARCH", index_name, query)
             res = []
-            for cid in client_ids:
-                try:
-                    client_data = self.redis.get(f"client:{cid}")
-                    if client_data:
-                        client = cast2client(client_data)
-                        if client.api_key != "revoked":
-                            res.append(client)
-                except Exception as e:
-                    LOG.warning(f"Failed to deserialize client data: {e}")
-            LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
+            if results and len(results) > 1:
+                for i in range(1, len(results), 2):
+                    client_key = results[i]
+                    if client_key.startswith("client:"):
+                        client_data = self.redis.get(client_key)
+                        if client_data:
+                            try:
+                                client = cast2client(client_data)
+                                if client.api_key != "revoked":
+                                    res.append(client)
+                            except Exception as e:
+                                LOG.warning(f"Failed to deserialize client data: {e}")
             return res
+        except Exception:
+            return []
 
+    def _search_with_index(self, key: str, val: str) -> List[Client]:
+        """Search using Redis sets for indexed fields."""
+        LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
+        client_ids = self.redis.smembers(f"{self.index_prefix}:{key}:{val}")
+        res = []
+        for cid in client_ids:
+            try:
+                client_data = self.redis.get(f"client:{cid}")
+                if client_data:
+                    client = cast2client(client_data)
+                    if client.api_key != "revoked":
+                        res.append(client)
+            except Exception as e:
+                LOG.warning(f"Failed to deserialize client data: {e}")
+        LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
+        return res
+
+    def _search_brute_force(self, key: str, val) -> List[Client]:
+        """Fallback search by scanning all clients."""
         res = []
         for client_id in self.redis.scan_iter("client:*"):
             if client_id.startswith(f"{self.index_prefix}:"):
@@ -409,6 +344,27 @@ class RedisDB(AbstractRemoteDB):
                 LOG.warning(f"Failed to deserialize client data: {e}")
                 continue
         return res
+
+    def search_by_value(self, key: str, val) -> List[Client]:
+        """
+        Search for clients by a specific key-value pair in Redis.
+
+        Args:
+            key: The key to search by.
+            val: The value to search for.
+
+        Returns:
+            A list of clients that match the search criteria.
+        """
+        if self.redisearch_available and key in ['name', 'api_key']:
+            redisearch_results = self._search_with_redisearch(key, val)
+            if redisearch_results:
+                return redisearch_results
+
+        if key in ['name', 'api_key']:
+            return self._search_with_index(key, val)
+
+        return self._search_brute_force(key, val)
 
     def __len__(self) -> int:
         """
