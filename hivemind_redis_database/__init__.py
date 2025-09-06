@@ -140,7 +140,12 @@ class RedisDB(AbstractRemoteDB):
             if self.ssl_certfile and self.ssl_keyfile:
                 ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
             ssl_context.check_hostname = self.ssl_check_hostname
-            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+            mode_map = {
+                "required": ssl.CERT_REQUIRED,
+                "optional": ssl.CERT_OPTIONAL,
+                "none": ssl.CERT_NONE,
+            }
+            ssl_context.verify_mode = mode_map[self.ssl_cert_reqs.lower()]
             return ssl_context
         except Exception as e:
             LOG.error(f"Failed to create SSL context: {e}")
@@ -211,10 +216,16 @@ class RedisDB(AbstractRemoteDB):
         self.redis_pool = redis.ConnectionPool(
             max_connections=self.max_connections,
             retry_on_timeout=True,
-            retry_on_error=[redis.ConnectionError, redis.TimeoutError],
             **connection_kwargs
         )
-        return redis.StrictRedis(connection_pool=self.redis_pool)
+        return redis.StrictRedis(
+            connection_pool=self.redis_pool,
+            retry=redis.retry.Retry(
+                redis.backoff.ExponentialBackoff(base=self.retry_delay),
+                retries=self.retry_attempts
+            ),
+            retry_on_error=[redis.ConnectionError, redis.TimeoutError],
+        )
 
     def _create_cluster_connection(self) -> redis.RedisCluster:
         """
@@ -288,29 +299,12 @@ class RedisDB(AbstractRemoteDB):
 
     def _get_next_client_id(self) -> int:
         """
-        Generate the next sequential client ID.
+        Generate the next sequential client ID using Redis INCR for atomicity.
 
         Returns:
             The next available client ID
         """
-        max_id = 0
-        for client_key in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
-            try:
-                key_parts = client_key.split(":")
-                if len(key_parts) >= 3:
-                    client_id = int(key_parts[-1])
-                    # Only consider non-revoked clients for ID generation
-                    client_data = self.redis.get(client_key)
-                    if client_data:
-                        try:
-                            data = json.loads(client_data)
-                            if data.get('api_key') != 'revoked':
-                                max_id = max(max_id, client_id)
-                        except (json.JSONDecodeError, KeyError):
-                            max_id = max(max_id, client_id)
-            except (ValueError, IndexError):
-                continue
-        return max_id + 1
+        return int(self.redis.incr(f"{self.index_prefix}:id_seq"))
 
     def add_item(self, client: Client) -> bool:
         """
@@ -352,6 +346,11 @@ class RedisDB(AbstractRemoteDB):
             p.set(f"{self.index_prefix}:client:{client.client_id}", client.serialize())
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            # Feed RediSearch doc
+            p.hset(f"{self.index_prefix}idx:{client.client_id}", mapping={
+                "name": client.name,
+                "api_key": client.api_key,
+            })
             p.incr(f"{self.index_prefix}:count")
             p.execute()
             
@@ -408,8 +407,12 @@ class RedisDB(AbstractRemoteDB):
             # Update indices
             p.srem(f"{self.index_prefix}:name:{old_name}", client_id)
             p.srem(f"{self.index_prefix}:api_key:{old_api_key}", client_id)
-            p.sadd(f"{self.index_prefix}:name:", client_id)
             p.sadd(f"{self.index_prefix}:api_key:revoked", client_id)
+            # Update RediSearch doc
+            p.hset(f"{self.index_prefix}idx:{client_id}", mapping={
+                "name": "",
+                "api_key": "revoked",
+            })
 
             p.execute()
 
@@ -463,6 +466,11 @@ class RedisDB(AbstractRemoteDB):
             if old_client.api_key != client.api_key:
                 p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(client.client_id))
                 p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            # Update RediSearch doc
+            p.hset(f"{self.index_prefix}idx:{client.client_id}", mapping={
+                "name": client.name,
+                "api_key": client.api_key,
+            })
             
             p.execute()
             LOG.debug(f"Successfully updated client '{client.client_id}'")
@@ -484,13 +492,17 @@ class RedisDB(AbstractRemoteDB):
         """
         try:
             index_name = f"{self.index_prefix}_search_index"
-            query = f"@{key}:{val}"
+            def _esc(v: str) -> str:
+                return v.replace('\\', '\\\\').replace('"', '\\"').replace(':', '\\:')
+            query = f'@{key}:"{_esc(str(val))}"'
             results = self.redis.execute_command("FT.SEARCH", index_name, query)
             res = []
             if results and len(results) > 1:
                 for i in range(1, len(results), 2):
-                    client_key = results[i]
-                    if client_key.startswith(f"{self.index_prefix}:client:"):
+                    doc_key = results[i]
+                    if doc_key.startswith(f"{self.index_prefix}idx:"):
+                        client_id = doc_key.split(":")[-1]
+                        client_key = f"{self.index_prefix}:client:{client_id}"
                         client_data = self.redis.get(client_key)
                         if client_data:
                             try:
