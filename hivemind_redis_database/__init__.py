@@ -25,7 +25,7 @@ class RedisDB(AbstractRemoteDB):
     username: Optional[str] = "default"
     db: Optional[int] = 0
     cluster_nodes: Optional[List[dict]] = None
-    index_prefix: str = "client:index"
+    index_prefix: str = "client"
     max_connections: int = 5
     ssl: bool = False
     retry_attempts: int = 3
@@ -47,10 +47,10 @@ class RedisDB(AbstractRemoteDB):
             LOG.info("Single Redis instance detected, using standard client")
             self.redis = self._create_single_connection()
 
-        counter_key = f"{self.name}:count"
+        counter_key = f"{self.index_prefix}:count"
         if not self.redis.exists(counter_key):
             self.redis.setnx(counter_key, 0)
-            LOG.debug("Initialized client counter to 0")
+            LOG.debug(f"Initialized client counter to 0 for {self.index_prefix}")
 
         self.redisearch_available = self._check_redisearch_availability()
         if self.redisearch_available:
@@ -192,12 +192,12 @@ class RedisDB(AbstractRemoteDB):
         Set up RediSearch index for clients if available.
         """
         try:
-            index_name = f"{self.name}_search_index"
+            index_name = f"{self.index_prefix}_search_index"
             # Index minimal per-client hashes under clientidx:{id}
             self.redis.execute_command(
                 "FT.CREATE", index_name,
                 "ON", "HASH",
-                "PREFIX", "1", "clientidx:",
+                "PREFIX", "1", f"{self.index_prefix}idx:",
                 "SCHEMA",
                 "name", "TEXT",
                 "api_key", "TEXT"
@@ -214,10 +214,10 @@ class RedisDB(AbstractRemoteDB):
     def add_item(self, client: Client) -> bool:
         try:
             p = self.redis.pipeline()
-            p.set(f"client:{client.client_id}", client.serialize())
+            p.set(f"{self.index_prefix}:client:{client.client_id}", client.serialize())
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
-            p.incr(f"{self.name}:count")
+            p.incr(f"{self.index_prefix}:count")
             p.execute()
             return True
         except Exception as e:
@@ -234,9 +234,9 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             True if the removal was successful, False otherwise.
         """
-        counter_key = f"{self.name}:count"
+        counter_key = f"{self.index_prefix}:count"
         try:
-            item_key = f"client:{client_id}"
+            item_key = f"{self.index_prefix}:client:{client_id}"
             client_data = self.redis.get(item_key)
             if not client_data:
                 LOG.warning(f"Client '{client_id}' not found for removal")
@@ -277,7 +277,7 @@ class RedisDB(AbstractRemoteDB):
 
     def update_client(self, client: Client) -> bool:
         try:
-            item_key = f"client:{client.client_id}"
+            item_key = f"{self.index_prefix}:client:{client.client_id}"
             old_client_data = self.redis.get(item_key)
             if not old_client_data:
                 LOG.warning(f"Client '{client.client_id}' not found for update")
@@ -313,14 +313,14 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         try:
-            index_name = f"{self.name}_search_index"
+            index_name = f"{self.index_prefix}_search_index"
             query = f"@{key}:{val}"
             results = self.redis.execute_command("FT.SEARCH", index_name, query)
             res = []
             if results and len(results) > 1:
                 for i in range(1, len(results), 2):
                     client_key = results[i]
-                    if client_key.startswith("client:"):
+                    if client_key.startswith(f"{self.index_prefix}:client:"):
                         client_data = self.redis.get(client_key)
                         if client_data:
                             try:
@@ -349,7 +349,7 @@ class RedisDB(AbstractRemoteDB):
         res = []
         for cid in client_ids:
             try:
-                client_data = self.redis.get(f"client:{cid}")
+                client_data = self.redis.get(f"{self.index_prefix}:client:{cid}")
                 if client_data:
                     client = cast2client(client_data)
                     if client.api_key != "revoked":
@@ -371,9 +371,7 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         res = []
-        for client_id in self.redis.scan_iter("client:*"):
-            if client_id.startswith(f"{self.index_prefix}:"):
-                continue
+        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
             try:
                 client_data = self.redis.get(client_id)
                 if client_data:
@@ -413,7 +411,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             The number of clients in the database.
         """
-        counter_key = f"{self.name}:count"
+        counter_key = f"{self.index_prefix}:count"
         try:
             count = self.redis.get(counter_key)
             if count is not None:
@@ -431,9 +429,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             An iterator over the clients in the database.
         """
-        for client_id in self.redis.scan_iter(f"client:*"):
-            if client_id.startswith(f"{self.index_prefix}:"):
-                continue
+        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
             try:
                 client = cast2client(self.redis.get(client_id))
                 for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
