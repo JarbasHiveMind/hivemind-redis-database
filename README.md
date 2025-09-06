@@ -17,12 +17,14 @@ Add to your `server.json` configuration file:
 ```json
 {
   "database": {
-    "module": "hivemind_redis_database",
-    "host": "127.0.0.1",
-    "port": 6379,
-    "db": 0,
-    "password": "your_password",
-    "max_connections": 10
+    "module": "hivemind-redis-db-plugin",
+    "hivemind-redis-db-plugin": {
+      "host": "127.0.0.1",
+      "port": 6379,
+      "db": 1,
+      "password": "",
+      "max_connections": 10
+    }
   }
 }
 ```
@@ -32,14 +34,16 @@ Add to your `server.json` configuration file:
 ```json
 {
   "database": {
-    "module": "hivemind_redis_database",
-    "cluster_nodes": [
-      {"host": "redis-node1", "port": 6379},
-      {"host": "redis-node2", "port": 6380},
-      {"host": "redis-node3", "port": 6381}
-    ],
-    "password": "your_password",
-    "max_connections": 20
+    "module": "hivemind-redis-db-plugin",
+    "hivemind-redis-db-plugin": {
+      "cluster_nodes": [
+        {"host": "redis-node1", "port": 6379},
+        {"host": "redis-node2", "port": 6380},
+        {"host": "redis-node3", "port": 6381}
+      ],
+      "password": "your_password",
+      "max_connections": 20
+    }
   }
 }
 ```
