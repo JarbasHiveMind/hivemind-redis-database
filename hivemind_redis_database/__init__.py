@@ -9,6 +9,34 @@ from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2clie
 
 @dataclass
 class RedisDB(AbstractRemoteDB):
+    """
+    Redis database implementation for HiveMind with advanced features.
+
+    This class provides a high-performance Redis-based database solution for HiveMind,
+    supporting both single Redis instances and Redis Cluster configurations. It includes
+    automatic RediSearch integration, connection pooling, and comprehensive error handling.
+
+    Features:
+        - Automatic Redis vs Redis Cluster detection and configuration
+        - RediSearch integration with fallback to basic indexing
+        - Connection pooling with health checks and retry logic
+        - Sequential client ID generation
+        - Multi-hub support via configurable key prefixes
+        - Production-ready error handling and logging
+
+    Attributes:
+        host (str): Redis server hostname (default: "127.0.0.1")
+        port (int): Redis server port (default: 6379)
+        name (str): Database name identifier (default: "clients")
+        password (Optional[str]): Redis authentication password
+        username (Optional[str]): Redis authentication username (default: "default")
+        db (Optional[int]): Redis database number for single instance
+        cluster_nodes (Optional[List[dict]]): Redis Cluster node configuration
+        index_prefix (str): Key prefix for all database operations (default: "client")
+        max_connections (int): Maximum connection pool size (default: 5)
+        retry_attempts (int): Number of retry attempts (default: 3)
+        retry_delay (float): Delay between retry attempts in seconds (default: 0.1)
+    """
     host: str = "127.0.0.1"
     port: int = 6379
     name: str = "clients"
