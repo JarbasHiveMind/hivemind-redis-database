@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from typing import List, Optional, Iterable
+from typing import List, Optional, Iterable, Union
+import json
+import ssl
 
 import redis
 from ovos_utils.log import LOG
@@ -36,7 +38,7 @@ class RedisDB(AbstractRemoteDB):
         max_connections (int): Maximum connection pool size (default: 5)
         retry_attempts (int): Number of retry attempts (default: 3)
         retry_delay (float): Delay between retry attempts in seconds (default: 0.1)
-        ssl (bool): Enable SSL/TLS connection (default: False)
+        use_ssl (bool): Enable SSL/TLS connection (default: False)
         ssl_certfile (Optional[str]): Path to SSL certificate file
         ssl_keyfile (Optional[str]): Path to SSL private key file
         ssl_ca_certs (Optional[str]): Path to CA certificates file
@@ -54,7 +56,7 @@ class RedisDB(AbstractRemoteDB):
     max_connections: int = 5
     retry_attempts: int = 3
     retry_delay: float = 0.1
-    ssl: bool = False
+    use_ssl: bool = False
     ssl_certfile: Optional[str] = None
     ssl_keyfile: Optional[str] = None
     ssl_ca_certs: Optional[str] = None
@@ -121,6 +123,29 @@ class RedisDB(AbstractRemoteDB):
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
 
+    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """
+        Create SSL context for Redis connections.
+
+        Returns:
+            SSL context if SSL is enabled, None otherwise.
+        """
+        if not self.use_ssl:
+            return None
+
+        try:
+            ssl_context = ssl.create_default_context()
+            if self.ssl_ca_certs:
+                ssl_context.load_verify_locations(self.ssl_ca_certs)
+            if self.ssl_certfile and self.ssl_keyfile:
+                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
+            ssl_context.check_hostname = self.ssl_check_hostname
+            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+            return ssl_context
+        except Exception as e:
+            LOG.error(f"Failed to create SSL context: {e}")
+            return None
+
     def _detect_cluster(self) -> bool:
         """
         Detect if Redis is running in cluster mode.
@@ -132,16 +157,7 @@ class RedisDB(AbstractRemoteDB):
             return True
 
         try:
-            ssl_context = None
-            if self.ssl:
-                import ssl
-                ssl_context = ssl.create_default_context()
-                if self.ssl_ca_certs:
-                    ssl_context.load_verify_locations(self.ssl_ca_certs)
-                if self.ssl_certfile and self.ssl_keyfile:
-                    ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
-                ssl_context.check_hostname = self.ssl_check_hostname
-                ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+            ssl_context = self._create_ssl_context()
 
             test_client = redis.StrictRedis(
                 host=self.host,
@@ -151,8 +167,8 @@ class RedisDB(AbstractRemoteDB):
                 db=0,
                 socket_connect_timeout=2,
                 socket_timeout=2,
-                ssl=self.ssl,
-                ssl_context=ssl_context if self.ssl else None
+                ssl=self.use_ssl,
+                ssl_context=ssl_context
             )
             test_client.ping()
 
@@ -162,10 +178,11 @@ class RedisDB(AbstractRemoteDB):
             test_client.close()
             return is_cluster_enabled
 
-        except Exception:
+        except Exception as e:
+            LOG.debug(f"Cluster detection failed: {e}")
             return False
 
-    def _create_single_connection(self):
+    def _create_single_connection(self) -> redis.StrictRedis:
         """
         Create connection to single Redis instance.
 
@@ -184,16 +201,8 @@ class RedisDB(AbstractRemoteDB):
             'health_check_interval': 30,
         }
 
-        if self.ssl:
-            import ssl
-            ssl_context = ssl.create_default_context()
-            if self.ssl_ca_certs:
-                ssl_context.load_verify_locations(self.ssl_ca_certs)
-            if self.ssl_certfile and self.ssl_keyfile:
-                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
-            ssl_context.check_hostname = self.ssl_check_hostname
-            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
-
+        ssl_context = self._create_ssl_context()
+        if ssl_context:
             connection_kwargs.update({
                 'ssl': True,
                 'ssl_context': ssl_context,
@@ -207,7 +216,7 @@ class RedisDB(AbstractRemoteDB):
         )
         return redis.StrictRedis(connection_pool=self.redis_pool)
 
-    def _create_cluster_connection(self):
+    def _create_cluster_connection(self) -> redis.RedisCluster:
         """
         Create connection to Redis Cluster.
 
@@ -219,16 +228,7 @@ class RedisDB(AbstractRemoteDB):
         else:
             startup_nodes = [{"host": self.host, "port": self.port}]
 
-        ssl_context = None
-        if self.ssl:
-            import ssl
-            ssl_context = ssl.create_default_context()
-            if self.ssl_ca_certs:
-                ssl_context.load_verify_locations(self.ssl_ca_certs)
-            if self.ssl_certfile and self.ssl_keyfile:
-                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
-            ssl_context.check_hostname = self.ssl_check_hostname
-            ssl_context.verify_mode = getattr(ssl, f"VERIFY_{self.ssl_cert_reqs.upper()}")
+        ssl_context = self._create_ssl_context()
 
         try:
             return redis.RedisCluster(
@@ -241,14 +241,12 @@ class RedisDB(AbstractRemoteDB):
                 retry_on_timeout=True,
                 max_connections=self.max_connections,
                 skip_full_coverage_check=True,
-                ssl=self.ssl,
-                ssl_context=ssl_context if self.ssl else None
+                ssl=self.use_ssl,
+                ssl_context=ssl_context
             )
         except Exception as e:
             LOG.warning(f"Failed to create cluster connection: {e}")
             raise
-
-
 
     def _check_redisearch_availability(self) -> bool:
         """
@@ -301,13 +299,31 @@ class RedisDB(AbstractRemoteDB):
                 key_parts = client_key.split(":")
                 if len(key_parts) >= 3:
                     client_id = int(key_parts[-1])
-                    max_id = max(max_id, client_id)
+                    # Only consider non-revoked clients for ID generation
+                    client_data = self.redis.get(client_key)
+                    if client_data:
+                        try:
+                            data = json.loads(client_data)
+                            if data.get('api_key') != 'revoked':
+                                max_id = max(max_id, client_id)
+                        except (json.JSONDecodeError, KeyError):
+                            max_id = max(max_id, client_id)
             except (ValueError, IndexError):
                 continue
         return max_id + 1
 
     def add_item(self, client: Client) -> bool:
+        """
+        Add a new client to the Redis database or update existing client.
+
+        Args:
+            client: The client object to add or update.
+
+        Returns:
+            True if the client was added/updated successfully, False otherwise.
+        """
         try:
+            # Ensure client has a valid ID
             if not hasattr(client, 'client_id') or client.client_id is None:
                 client.client_id = self._get_next_client_id()
             elif isinstance(client.client_id, str):
@@ -318,58 +334,92 @@ class RedisDB(AbstractRemoteDB):
             elif not isinstance(client.client_id, int):
                 client.client_id = self._get_next_client_id()
 
+            # Check if client already exists - if so, update it instead of creating new
+            item_key = f"{self.index_prefix}:client:{client.client_id}"
+            if self.redis.exists(item_key):
+                LOG.debug(f"Client '{client.client_id}' already exists, updating instead of creating new")
+                return self.update_client(client)
+
+            # For new clients, ensure ID is unique
             while self.redis.exists(f"{self.index_prefix}:client:{client.client_id}"):
                 client.client_id = self._get_next_client_id()
 
+            # Ensure client attributes are initialized
+            self._ensure_client_attributes(client)
+
+            # Use pipeline for atomic operations
             p = self.redis.pipeline()
             p.set(f"{self.index_prefix}:client:{client.client_id}", client.serialize())
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
             p.incr(f"{self.index_prefix}:count")
             p.execute()
+            
+            LOG.debug(f"Successfully added client '{client.client_id}'")
             return True
         except Exception as e:
             LOG.error(f"Failed to add client: {e}")
             return False
 
-    def remove_client(self, client_id: str) -> bool:
+    def delete_item(self, client: Client) -> bool:
         """
-        Remove a client from Redis and clean up indices.
+        Revoke a client's credentials by updating their record.
+        This is the method called by hivemind-core delete-client command.
 
         Args:
-            client_id: The ID of the client to remove.
+            client: The client object to revoke.
 
         Returns:
-            True if the removal was successful, False otherwise.
+            True if the revocation was successful, False otherwise.
         """
-        counter_key = f"{self.index_prefix}:count"
+        return self.remove_client(str(client.client_id))
+
+    def remove_client(self, client_id: str) -> bool:
+        """
+        Revoke a client's credentials by updating their record.
+
+        Args:
+            client_id: The ID of the client to revoke.
+
+        Returns:
+            True if the revocation was successful, False otherwise.
+        """
         try:
             item_key = f"{self.index_prefix}:client:{client_id}"
             client_data = self.redis.get(item_key)
             if not client_data:
-                LOG.warning(f"Client '{client_id}' not found for removal")
+                LOG.warning(f"Client '{client_id}' not found for revocation")
                 return False
 
-            self.redis.delete(item_key)
-            self.redis.decr(counter_key)
+            # Parse the serialized data (assuming JSON)
+            data = json.loads(client_data)
+            old_name = data.get('name', '')
+            old_api_key = data.get('api_key', '')
 
-            try:
-                client = cast2client(client_data)
-                self.redis.srem(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
-                self.redis.srem(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
-            except Exception as e:
-                LOG.warning(f"Failed to deserialize client data for index cleanup: {e}")
+            # Revoke credentials
+            data['name'] = ""
+            data['api_key'] = "revoked"
+            data['password'] = None
+            data['crypto_key'] = None
 
-            LOG.info(f"Successfully removed client '{client_id}'")
+            p = self.redis.pipeline()
+            p.set(item_key, json.dumps(data))
+
+            # Update indices
+            p.srem(f"{self.index_prefix}:name:{old_name}", client_id)
+            p.srem(f"{self.index_prefix}:api_key:{old_api_key}", client_id)
+            p.sadd(f"{self.index_prefix}:name:", client_id)
+            p.sadd(f"{self.index_prefix}:api_key:revoked", client_id)
+
+            p.execute()
+
+            LOG.info(f"Successfully revoked client '{client_id}'")
             return True
-        except redis.ConnectionError as e:
-            LOG.error(f"Redis connection error while removing client '{client_id}': {e}")
-            return False
-        except redis.TimeoutError as e:
-            LOG.error(f"Redis timeout error while removing client '{client_id}': {e}")
+        except json.JSONDecodeError as e:
+            LOG.error(f"Failed to parse client data for '{client_id}': {e}")
             return False
         except Exception as e:
-            LOG.error(f"Unexpected error while removing client '{client_id}': {e}")
+            LOG.error(f"Unexpected error while revoking client '{client_id}': {e}")
             return False
 
     def _ensure_client_attributes(self, client: Client):
@@ -384,6 +434,15 @@ class RedisDB(AbstractRemoteDB):
                 setattr(client, attr, [])
 
     def update_client(self, client: Client) -> bool:
+        """
+        Update an existing client's information in Redis.
+
+        Args:
+            client: The client object with updated information.
+
+        Returns:
+            True if the update was successful, False otherwise.
+        """
         try:
             item_key = f"{self.index_prefix}:client:{client.client_id}"
             old_client_data = self.redis.get(item_key)
@@ -396,14 +455,17 @@ class RedisDB(AbstractRemoteDB):
 
             p = self.redis.pipeline()
             p.set(item_key, client.serialize())
+            
+            # Update indices only if values changed
             if old_client.name != client.name:
-                p.srem(f"{self.index_prefix}:name:{old_client.name}", str(old_client.client_id))
+                p.srem(f"{self.index_prefix}:name:{old_client.name}", str(client.client_id))
                 p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             if old_client.api_key != client.api_key:
-                p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(old_client.client_id))
+                p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(client.client_id))
                 p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            
             p.execute()
-
+            LOG.debug(f"Successfully updated client '{client.client_id}'")
             return True
         except Exception as e:
             LOG.error(f"Failed to update client '{client.client_id}': {e}")
