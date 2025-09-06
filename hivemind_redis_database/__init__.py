@@ -49,7 +49,7 @@ class RedisDB(AbstractRemoteDB):
 
         counter_key = f"{self.name}:count"
         if not self.redis.exists(counter_key):
-            self.redis.set(counter_key, 0)
+            self.redis.setnx(counter_key, 0)
             LOG.debug("Initialized client counter to 0")
 
         self.redisearch_available = self._check_redisearch_availability()
@@ -193,8 +193,15 @@ class RedisDB(AbstractRemoteDB):
         """
         try:
             index_name = f"{self.name}_search_index"
-            self.redis.execute_command("FT.CREATE", index_name, "ON", "HASH", "PREFIX", "1", "client:",
-                                     "SCHEMA", "name", "TEXT", "api_key", "TEXT")
+            # Index minimal per-client hashes under clientidx:{id}
+            self.redis.execute_command(
+                "FT.CREATE", index_name,
+                "ON", "HASH",
+                "PREFIX", "1", "clientidx:",
+                "SCHEMA",
+                "name", "TEXT",
+                "api_key", "TEXT"
+            )
             LOG.debug(f"Created RediSearch index '{index_name}'")
         except redis.ResponseError as e:
             if "Index already exists" in str(e):
@@ -206,10 +213,12 @@ class RedisDB(AbstractRemoteDB):
 
     def add_item(self, client: Client) -> bool:
         try:
-            self.redis.set(f"client:{client.client_id}", client.serialize())
-            self.redis.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
-            self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
-            self.redis.incr(f"{self.name}:count")
+            p = self.redis.pipeline()
+            p.set(f"client:{client.client_id}", client.serialize())
+            p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
+            p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            p.incr(f"{self.name}:count")
+            p.execute()
             return True
         except Exception as e:
             LOG.error(f"Failed to add client '{client.client_id}': {e}")
@@ -269,7 +278,6 @@ class RedisDB(AbstractRemoteDB):
     def update_client(self, client: Client) -> bool:
         try:
             item_key = f"client:{client.client_id}"
-
             old_client_data = self.redis.get(item_key)
             if not old_client_data:
                 LOG.warning(f"Client '{client.client_id}' not found for update")
@@ -278,15 +286,15 @@ class RedisDB(AbstractRemoteDB):
             old_client = cast2client(old_client_data)
             self._ensure_client_attributes(client)
 
-            self.redis.set(item_key, client.serialize())
-
+            p = self.redis.pipeline()
+            p.set(item_key, client.serialize())
             if old_client.name != client.name:
-                self.redis.srem(f"{self.index_prefix}:name:{old_client.name}", str(old_client.client_id))
-                self.redis.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
-
+                p.srem(f"{self.index_prefix}:name:{old_client.name}", str(old_client.client_id))
+                p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             if old_client.api_key != client.api_key:
-                self.redis.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(old_client.client_id))
-                self.redis.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+                p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(old_client.client_id))
+                p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            p.execute()
 
             return True
         except Exception as e:
@@ -410,7 +418,7 @@ class RedisDB(AbstractRemoteDB):
             count = self.redis.get(counter_key)
             if count is not None:
                 return int(count)
-            self.redis.set(counter_key, 0)
+            self.redis.setnx(counter_key, 0)
             return 0
         except Exception as e:
             LOG.warning(f"Failed to get client count from counter: {e}")
