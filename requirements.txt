@@ -1,2 +1,3 @@
-py-redis
+redis>=4.0.0
+hiredis>=2.0.0
 hivemind-plugin-manager>=0.1.0,<1.0.0
