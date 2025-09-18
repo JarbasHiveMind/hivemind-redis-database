@@ -149,7 +149,7 @@ class RedisDB(AbstractRemoteDB):
             return ssl_context
         except Exception as e:
             LOG.error(f"Failed to create SSL context: {e}")
-            return None
+            raise
 
     def _detect_cluster(self) -> bool:
         """
@@ -207,11 +207,10 @@ class RedisDB(AbstractRemoteDB):
         }
 
         ssl_context = self._create_ssl_context()
-        if ssl_context:
-            connection_kwargs.update({
-                'ssl': True,
-                'ssl_context': ssl_context,
-            })
+        if self.use_ssl:
+            connection_kwargs['ssl'] = True
+            if ssl_context:
+                connection_kwargs['ssl_context'] = ssl_context
 
         self.redis_pool = redis.ConnectionPool(
             max_connections=self.max_connections,
