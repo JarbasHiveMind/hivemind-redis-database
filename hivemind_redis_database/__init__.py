@@ -283,7 +283,7 @@ class RedisDB(AbstractRemoteDB):
             self.redis.execute_command(
                 "FT.CREATE", index_name,
                 "ON", "HASH",
-                "PREFIX", "1", f"{self.index_prefix}idx:",
+                "PREFIX", "1", f"{self.index_prefix}:idx:",
                 "SCHEMA",
                 "name", "TEXT",
                 "api_key", "TEXT"
@@ -347,7 +347,7 @@ class RedisDB(AbstractRemoteDB):
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
             # Feed RediSearch doc
-            p.hset(f"{self.index_prefix}idx:{client.client_id}", mapping={
+            p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
                 "name": client.name,
                 "api_key": client.api_key,
             })
@@ -409,7 +409,7 @@ class RedisDB(AbstractRemoteDB):
             p.srem(f"{self.index_prefix}:api_key:{old_api_key}", client_id)
             p.sadd(f"{self.index_prefix}:api_key:revoked", client_id)
             # Update RediSearch doc
-            p.hset(f"{self.index_prefix}idx:{client_id}", mapping={
+            p.hset(f"{self.index_prefix}:idx:{client_id}", mapping={
                 "name": "",
                 "api_key": "revoked",
             })
@@ -467,7 +467,7 @@ class RedisDB(AbstractRemoteDB):
                 p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(client.client_id))
                 p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
             # Update RediSearch doc
-            p.hset(f"{self.index_prefix}idx:{client.client_id}", mapping={
+            p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
                 "name": client.name,
                 "api_key": client.api_key,
             })
@@ -500,7 +500,7 @@ class RedisDB(AbstractRemoteDB):
             if results and len(results) > 1:
                 for i in range(1, len(results), 2):
                     doc_key = results[i]
-                    if doc_key.startswith(f"{self.index_prefix}idx:"):
+                    if doc_key.startswith(f"{self.index_prefix}:idx:"):
                         client_id = doc_key.split(":")[-1]
                         client_key = f"{self.index_prefix}:client:{client_id}"
                         client_data = self.redis.get(client_key)
