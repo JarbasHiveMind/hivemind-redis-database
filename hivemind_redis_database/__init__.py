@@ -210,6 +210,13 @@ class RedisDB(AbstractRemoteDB):
             return self.redis.pipeline(transaction=True)
         return self.redis.pipeline()
 
+    def _retry_policy(self) -> redis.retry.Retry:
+        """Build a shared retry policy for Redis clients."""
+        return redis.retry.Retry(
+            redis.backoff.ExponentialBackoff(base=self.retry_delay),
+            retries=self.retry_attempts,
+        )
+
     def _get_ssl_kwargs(self) -> dict:
         """
         Build SSL kwargs compatible with redis-py clients.
@@ -260,6 +267,7 @@ class RedisDB(AbstractRemoteDB):
         if self.cluster_nodes:
             return True
 
+        test_client = None
         try:
             connection_kwargs = {
                 "host": self.host,
@@ -275,15 +283,35 @@ class RedisDB(AbstractRemoteDB):
             test_client = redis.StrictRedis(**connection_kwargs)
             test_client.ping()
 
-            info = test_client.info('cluster')
-            is_cluster_enabled = info.get('cluster_enabled', 0) == 1
+            try:
+                info = test_client.info("cluster")
+                cluster_enabled = info.get("cluster_enabled")
+                if cluster_enabled in (1, "1", True):
+                    return True
+                if cluster_enabled in (0, "0", False):
+                    return False
+            except redis.ResponseError as e:
+                LOG.debug(f"INFO cluster failed during detection: {e}")
 
-            test_client.close()
-            return is_cluster_enabled
+            try:
+                cluster_info = test_client.execute_command("CLUSTER", "INFO")
+                cluster_info = cluster_info.decode() if isinstance(cluster_info, bytes) else str(cluster_info)
+                return "cluster_state:" in cluster_info or "cluster_slots_assigned:" in cluster_info
+            except redis.ResponseError as e:
+                if "cluster support disabled" in str(e).lower():
+                    return False
+                LOG.debug(f"CLUSTER INFO failed during detection: {e}")
+                return False
 
         except Exception as e:
             LOG.debug(f"Cluster detection failed: {e}")
             return False
+        finally:
+            if test_client is not None:
+                try:
+                    test_client.close()
+                except Exception:
+                    pass
 
     def _create_single_connection(self) -> redis.StrictRedis:
         """
@@ -308,10 +336,7 @@ class RedisDB(AbstractRemoteDB):
 
         client = redis.StrictRedis(
             **connection_kwargs,
-            retry=redis.retry.Retry(
-                redis.backoff.ExponentialBackoff(base=self.retry_delay),
-                retries=self.retry_attempts
-            ),
+            retry=self._retry_policy(),
             retry_on_error=[redis.ConnectionError, redis.TimeoutError],
         )
         self.redis_pool = client.connection_pool
@@ -334,6 +359,8 @@ class RedisDB(AbstractRemoteDB):
             "socket_timeout": 5,
             "max_connections": self.max_connections,
             "skip_full_coverage_check": True,
+            "cluster_error_retry_attempts": self.retry_attempts,
+            "retry": self._retry_policy(),
         }
         connection_kwargs.update(self._get_ssl_kwargs())
 
@@ -635,20 +662,16 @@ class RedisDB(AbstractRemoteDB):
             query = f'@{key}:"{_esc(str(val))}"'
             results = self.redis.execute_command("FT.SEARCH", index_name, query)
             res = []
+            client_keys = []
             if results and len(results) > 1:
                 for i in range(1, len(results), 2):
                     doc_key = results[i]
                     if doc_key.startswith(f"{self._key('idx')}:"):
                         client_id = doc_key.split(":")[-1]
-                        client_key = self._client_key(client_id)
-                        client_data = self.redis.get(client_key)
-                        if client_data:
-                            try:
-                                client = cast2client(client_data)
-                                if hasattr(client, key) and getattr(client, key) == val and client.api_key != "revoked":
-                                    res.append(client)
-                            except Exception as e:
-                                LOG.warning(f"Failed to deserialize client data: {e}")
+                        client_keys.append(self._client_key(client_id))
+                for client in self._load_clients(client_keys):
+                    if hasattr(client, key) and getattr(client, key) == val:
+                        res.append(client)
             return res
         except Exception:
             return []
@@ -666,16 +689,8 @@ class RedisDB(AbstractRemoteDB):
         """
         LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
         client_ids = self.redis.smembers(self._key(key, val))
-        res = []
-        for cid in client_ids:
-            try:
-                client_data = self.redis.get(self._client_key(cid))
-                if client_data:
-                    client = cast2client(client_data)
-                    if client.api_key != "revoked":
-                        res.append(client)
-            except Exception as e:
-                LOG.warning(f"Failed to deserialize client data: {e}")
+        client_keys = [self._client_key(cid) for cid in client_ids]
+        res = self._load_clients(client_keys)
         LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
         return res
 
@@ -691,16 +706,10 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         res = []
-        for client_id in self.redis.scan_iter(self._scan_pattern("client"), count=100):
-            try:
-                client_data = self.redis.get(client_id)
-                if client_data:
-                    client = cast2client(client_data)
-                    if hasattr(client, key) and getattr(client, key) == val and client.api_key != "revoked":
-                        res.append(client)
-            except Exception as e:
-                LOG.warning(f"Failed to deserialize client data: {e}")
-                continue
+        for batch in self._iter_key_batches(self.redis.scan_iter(self._scan_pattern("client"), count=100)):
+            for client in self._load_clients(batch):
+                if hasattr(client, key) and getattr(client, key) == val:
+                    res.append(client)
         return res
 
     def search_by_value(self, key: str, val) -> List[Client]:
@@ -782,6 +791,49 @@ class RedisDB(AbstractRemoteDB):
             LOG.error(f"Failed to sync Redis database: {e}")
             return False
 
+    def _iter_key_batches(self, keys: Iterable[str], batch_size: int = 100) -> Iterable[List[str]]:
+        """Yield keys in fixed-size batches for pipelined reads."""
+        batch = []
+        for key in keys:
+            batch.append(key)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def _get_many(self, keys: List[str]) -> List[Optional[str]]:
+        """Fetch multiple keys efficiently across single-node and cluster clients."""
+        if not keys:
+            return []
+
+        if not getattr(self, "is_cluster", False) and hasattr(self.redis, "mget"):
+            try:
+                return list(self.redis.mget(keys))
+            except Exception as e:
+                LOG.debug(f"mget batch read failed, falling back to pipeline: {e}")
+
+        pipe = self.redis.pipeline()
+        for key in keys:
+            pipe.get(key)
+        return pipe.execute()
+
+    def _load_clients(self, keys: List[str], *, include_revoked: bool = False) -> List[Client]:
+        """Load and deserialize client records from Redis keys."""
+        clients = []
+        for key, client_data in zip(keys, self._get_many(keys)):
+            if not client_data or client_data == CREATE_MARKER:
+                continue
+            try:
+                client = cast2client(client_data)
+                if not include_revoked and client.api_key == "revoked":
+                    continue
+                self._ensure_client_attributes(client)
+                clients.append(client)
+            except Exception as e:
+                LOG.warning(f"Failed to deserialize client data for '{key}': {e}")
+        return clients
+
     def __len__(self) -> int:
         """
         Get the number of items in the Redis database.
@@ -807,22 +859,9 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             An iterator over the clients in the database.
         """
-        for client_id in self.redis.scan_iter(self._scan_pattern("client"), count=100):
-            try:
-                client_data = self.redis.get(client_id)
-                if not client_data or client_data == CREATE_MARKER:
-                    continue
-
-                client = cast2client(client_data)
-                if client.api_key == "revoked":
-                    continue
-
-                for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
-                    if not hasattr(client, attr) or getattr(client, attr) is None:
-                        setattr(client, attr, [])
+        for batch in self._iter_key_batches(self.redis.scan_iter(self._scan_pattern("client"), count=100)):
+            for client in self._load_clients(batch):
                 yield client
-            except Exception as e:
-                LOG.error(f"Failed to get client '{client_id}' : {e}")
 
     def __del__(self):
         """

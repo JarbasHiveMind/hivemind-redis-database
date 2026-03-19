@@ -2,6 +2,7 @@ import unittest
 from fnmatch import fnmatch
 from unittest.mock import Mock, patch
 
+import redis
 from redis.cluster import ClusterNode, key_slot
 
 from hivemind_plugin_manager import DatabaseFactory
@@ -15,6 +16,7 @@ class FakeRedis:
         self.hashes = {}
         self.connection_pool = Mock()
         self.pipeline_transaction_flags = []
+        self.mget_calls = []
 
     def exists(self, key):
         return key in self.storage or key in self.hashes
@@ -37,6 +39,10 @@ class FakeRedis:
 
     def get(self, key):
         return self.storage.get(key)
+
+    def mget(self, keys):
+        self.mget_calls.append(list(keys))
+        return [self.get(key) for key in keys]
 
     def delete(self, key):
         removed = 0
@@ -94,6 +100,10 @@ class FakePipeline:
 
     def set(self, *args, **kwargs):
         self.commands.append(("set", args, kwargs))
+        return self
+
+    def get(self, *args, **kwargs):
+        self.commands.append(("get", args, kwargs))
         return self
 
     def sadd(self, *args, **kwargs):
@@ -154,6 +164,9 @@ class SearchRedis:
 
     def get(self, key):
         return self.docs.get(key)
+
+    def mget(self, keys):
+        return [self.get(key) for key in keys]
 
 
 class RedisDBTests(unittest.TestCase):
@@ -236,6 +249,29 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(kwargs["ssl_ca_certs"], "/tmp/ca.crt")
         self.assertTrue(kwargs["ssl_check_hostname"])
 
+    @patch("hivemind_redis_database.redis.StrictRedis")
+    def test_detect_cluster_falls_back_to_cluster_info(self, strict_redis):
+        client = Mock()
+        client.info.side_effect = redis.ResponseError("unsupported section")
+        client.execute_command.return_value = "cluster_state:ok\r\ncluster_slots_assigned:16384"
+        strict_redis.return_value = client
+
+        db = object.__new__(RedisDB)
+        db.host = "redis.example.com"
+        db.port = 6379
+        db.password = None
+        db.username = "default"
+        db.use_ssl = False
+        db.ssl_certfile = None
+        db.ssl_keyfile = None
+        db.ssl_ca_certs = None
+        db.ssl_cert_reqs = "required"
+        db.ssl_check_hostname = True
+        db.cluster_nodes = None
+
+        self.assertTrue(db._detect_cluster())
+        client.execute_command.assert_called_once_with("CLUSTER", "INFO")
+
     def test_get_ssl_kwargs_disables_hostname_check_when_verification_is_disabled(self):
         db = object.__new__(RedisDB)
         db.use_ssl = True
@@ -250,6 +286,32 @@ class RedisDBTests(unittest.TestCase):
         self.assertTrue(ssl_kwargs["ssl"])
         self.assertEqual(ssl_kwargs["ssl_cert_reqs"], "none")
         self.assertFalse(ssl_kwargs["ssl_check_hostname"])
+
+    @patch("hivemind_redis_database.redis.RedisCluster")
+    def test_create_cluster_connection_uses_retry_policy(self, redis_cluster):
+        db = object.__new__(RedisDB)
+        db.cluster_nodes = [{"host": "redis-node1", "port": 6379}]
+        db.host = "127.0.0.1"
+        db.port = 6379
+        db.password = "secret"
+        db.username = "default"
+        db.max_connections = 10
+        db.retry_attempts = 4
+        db.retry_delay = 0.2
+        db.use_ssl = True
+        db.ssl_certfile = None
+        db.ssl_keyfile = None
+        db.ssl_ca_certs = "/tmp/ca.crt"
+        db.ssl_cert_reqs = "required"
+        db.ssl_check_hostname = True
+
+        db._create_cluster_connection()
+
+        kwargs = redis_cluster.call_args.kwargs
+        self.assertEqual(kwargs["cluster_error_retry_attempts"], 4)
+        self.assertIsInstance(kwargs["retry"], redis.retry.Retry)
+        self.assertTrue(kwargs["ssl"])
+        self.assertEqual(kwargs["ssl_ca_certs"], "/tmp/ca.crt")
 
     def test_redisearch_detected_from_module_list(self):
         db = object.__new__(RedisDB)
@@ -413,6 +475,7 @@ class RedisDBTests(unittest.TestCase):
         clients = list(db)
 
         self.assertEqual([(client.client_id, client.api_key) for client in clients], [(1, "active-key")])
+        self.assertGreaterEqual(len(redis_client.mget_calls), 1)
 
     def test_sync_rebuilds_indexes_counters_and_removes_stale_markers(self):
         redis_client = FakeRedis()
