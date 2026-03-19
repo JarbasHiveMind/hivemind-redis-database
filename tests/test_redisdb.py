@@ -24,7 +24,13 @@ class FakeRedis:
             return True
         return False
 
-    def set(self, key, value):
+    def set(self, key, value, nx=False, ex=None):
+        del ex
+        if nx:
+            if self.exists(key):
+                return False
+            self.storage[key] = value
+            return True
         self.storage[key] = value
         return True
 
@@ -68,7 +74,7 @@ class FakeRedis:
 
     def scan_iter(self, pattern, count=None):
         del count
-        for key in sorted(self.storage):
+        for key in sorted(set(self.storage) | set(self.hashes)):
             if fnmatch(key, pattern):
                 yield key
 
@@ -100,6 +106,10 @@ class FakePipeline:
         self.commands.append(("hset", args, kwargs))
         return self
 
+    def delete(self, *args, **kwargs):
+        self.commands.append(("delete", args, kwargs))
+        return self
+
     def incr(self, *args, **kwargs):
         self.commands.append(("incr", args, kwargs))
         return self
@@ -126,6 +136,22 @@ class FallbackSearchRedis:
         if args == ("FT._LIST",):
             return []
         raise AssertionError(f"Unexpected command: {args}")
+
+
+class SearchRedis:
+    def __init__(self):
+        self.docs = {
+            "client:client:1": '{"client_id": 1, "api_key": "key-1", "name": "alpha beta"}',
+            "client:client:2": '{"client_id": 2, "api_key": "key-2", "name": "alpha"}',
+        }
+
+    def execute_command(self, *args):
+        if args[:2] == ("FT.SEARCH", "client_search_index"):
+            return [2, "client:idx:1", [], "client:idx:2", []]
+        raise AssertionError(f"Unexpected command: {args}")
+
+    def get(self, key):
+        return self.docs.get(key)
 
 
 class RedisDBTests(unittest.TestCase):
@@ -232,6 +258,15 @@ class RedisDBTests(unittest.TestCase):
 
         self.assertTrue(db._check_redisearch_availability())
 
+    def test_redisearch_results_are_filtered_to_exact_matches(self):
+        db = object.__new__(RedisDB)
+        db.redis = SearchRedis()
+        db.index_prefix = "client"
+
+        results = db._search_with_redisearch("name", "alpha")
+
+        self.assertEqual([(client.client_id, client.name) for client in results], [(2, "alpha")])
+
     def test_crud_flow_updates_indexes_and_revocation_state(self):
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
@@ -291,6 +326,29 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(stored.name, "fresh")
         self.assertEqual(stored.api_key, "fresh-key")
 
+    def test_add_item_skips_stuck_create_marker_for_generated_id(self):
+        redis_client = FakeRedis()
+        redis_client.storage["client:client:1"] = "__hivemind_creating__"
+        db = self.build_db(redis_client)
+        db.retry_delay = 0
+        db.retry_attempts = 0
+
+        created = Client(client_id=0, api_key="fresh-key", name="fresh")
+        created.client_id = None
+
+        self.assertTrue(db.add_item(created))
+        self.assertEqual(created.client_id, 2)
+        self.assertEqual(Client.deserialize(redis_client.get("client:client:2")).name, "fresh")
+
+    def test_add_item_returns_false_for_locked_explicit_id(self):
+        redis_client = FakeRedis()
+        redis_client.storage["client:client:7"] = "__hivemind_creating__"
+        db = self.build_db(redis_client)
+        db.retry_delay = 0
+        db.retry_attempts = 0
+
+        self.assertFalse(db.add_item(Client(client_id=7, api_key="fresh-key", name="fresh")))
+
     def test_iter_skips_revoked_and_in_progress_records(self):
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
@@ -307,6 +365,33 @@ class RedisDBTests(unittest.TestCase):
         clients = list(db)
 
         self.assertEqual([(client.client_id, client.api_key) for client in clients], [(1, "active-key")])
+
+    def test_sync_rebuilds_indexes_counters_and_removes_stale_markers(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        db.redisearch_available = False
+
+        redis_client.storage["client:client:1"] = Client(client_id=1, api_key="alpha-key", name="alpha").serialize()
+        redis_client.storage["client:client:2"] = Client(client_id=2, api_key="revoked", name="").serialize()
+        redis_client.storage["client:client:3"] = "__hivemind_creating__"
+        redis_client.storage["client:count"] = "99"
+        redis_client.storage["client:id_seq"] = "1"
+        redis_client.storage["client:name:stale"] = {"999"}
+        redis_client.storage["client:api_key:stale"] = {"999"}
+        redis_client.hashes["client:idx:999"] = {"name": "stale", "api_key": "stale"}
+
+        self.assertTrue(db.sync())
+
+        self.assertEqual(len(db), 2)
+        self.assertEqual(redis_client.get("client:id_seq"), 2)
+        self.assertIsNone(redis_client.get("client:client:3"))
+        self.assertEqual(redis_client.smembers("client:name:alpha"), {"1"})
+        self.assertEqual(redis_client.smembers("client:api_key:alpha-key"), {"1"})
+        self.assertEqual(redis_client.smembers("client:api_key:revoked"), {"2"})
+        self.assertEqual(redis_client.smembers("client:name:stale"), set())
+        self.assertEqual(redis_client.smembers("client:api_key:stale"), set())
+        self.assertEqual(redis_client.hashes["client:idx:1"]["name"], "alpha")
+        self.assertNotIn("client:idx:999", redis_client.hashes)
 
 
 if __name__ == "__main__":

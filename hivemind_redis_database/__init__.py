@@ -10,6 +10,10 @@ from ovos_utils.log import LOG
 from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2client
 
 
+CREATE_MARKER = "__hivemind_creating__"
+CREATE_MARKER_TTL = 30
+
+
 @dataclass
 class RedisDB(AbstractRemoteDB):
     """
@@ -336,6 +340,18 @@ class RedisDB(AbstractRemoteDB):
         """
         return int(self.redis.incr(f"{self.index_prefix}:id_seq"))
 
+    def _claim_item_key(self, item_key: str) -> bool:
+        """
+        Reserve a client key while a new record is being created.
+
+        Uses an expiring marker in Redis so interrupted writes do not leave
+        permanent locks behind.
+        """
+        try:
+            return bool(self.redis.set(item_key, CREATE_MARKER, nx=True, ex=CREATE_MARKER_TTL))
+        except TypeError:
+            return bool(self.redis.setnx(item_key, CREATE_MARKER))
+
     def add_item(self, client: Client) -> bool:
         """
         Add a new client to the Redis database or update existing client.
@@ -346,7 +362,6 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             True if the client was added/updated successfully, False otherwise.
         """
-        create_marker = "__hivemind_creating__"
         claimed_key = None
         try:
             raw_client_id = getattr(client, "client_id", None)
@@ -367,18 +382,29 @@ class RedisDB(AbstractRemoteDB):
             # Ensure client attributes are initialized
             self._ensure_client_attributes(client)
             retry_delay = getattr(self, "retry_delay", 0.1)
+            max_marker_waits = max(1, getattr(self, "retry_attempts", 0) + 1)
+            marker_waits = 0
 
             while True:
                 item_key = f"{self.index_prefix}:client:{client.client_id}"
-                if self.redis.setnx(item_key, create_marker):
+                if self._claim_item_key(item_key):
                     claimed_key = item_key
                     break
 
                 existing_data = self.redis.get(item_key)
-                if existing_data == create_marker:
+                if existing_data == CREATE_MARKER:
+                    marker_waits += 1
+                    if marker_waits > max_marker_waits:
+                        if client_id_was_provided:
+                            LOG.warning(f"Client '{client.client_id}' is locked by an in-progress write")
+                            return False
+                        client.client_id = self._get_next_client_id()
+                        marker_waits = 0
+                        continue
                     time.sleep(retry_delay)
                     continue
 
+                marker_waits = 0
                 if client_id_was_provided:
                     LOG.debug(f"Client '{client.client_id}' already exists, updating instead of creating new")
                     return self.update_client(client)
@@ -403,7 +429,7 @@ class RedisDB(AbstractRemoteDB):
             LOG.debug(f"Successfully added client '{client.client_id}'")
             return True
         except Exception as e:
-            if claimed_key and self.redis.get(claimed_key) == create_marker:
+            if claimed_key and self.redis.get(claimed_key) == CREATE_MARKER:
                 self.redis.delete(claimed_key)
             LOG.error(f"Failed to add client: {e}")
             return False
@@ -555,7 +581,7 @@ class RedisDB(AbstractRemoteDB):
                         if client_data:
                             try:
                                 client = cast2client(client_data)
-                                if client.api_key != "revoked":
+                                if hasattr(client, key) and getattr(client, key) == val and client.api_key != "revoked":
                                     res.append(client)
                             except Exception as e:
                                 LOG.warning(f"Failed to deserialize client data: {e}")
@@ -634,6 +660,64 @@ class RedisDB(AbstractRemoteDB):
 
         return self._search_brute_force(key, val)
 
+    def sync(self):
+        """
+        Rebuild counters and secondary indexes from stored client records.
+
+        This repairs drift after interrupted writes or manual Redis changes.
+        """
+        try:
+            if self.redisearch_available:
+                self._setup_redisearch_index()
+
+            client_records = []
+            max_client_id = 0
+            for item_key in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
+                client_data = self.redis.get(item_key)
+                if not client_data:
+                    continue
+                if client_data == CREATE_MARKER:
+                    self.redis.delete(item_key)
+                    continue
+                try:
+                    client = cast2client(client_data)
+                    self._ensure_client_attributes(client)
+                    client_records.append(client)
+                    max_client_id = max(max_client_id, int(client.client_id))
+                except Exception as e:
+                    LOG.warning(f"Skipping invalid client record '{item_key}': {e}")
+
+            index_keys = []
+            for pattern in (
+                f"{self.index_prefix}:name:*",
+                f"{self.index_prefix}:api_key:*",
+                f"{self.index_prefix}:idx:*",
+            ):
+                index_keys.extend(list(self.redis.scan_iter(pattern, count=100)))
+
+            p = self.redis.pipeline()
+            for key in index_keys:
+                p.delete(key)
+
+            p.set(f"{self.index_prefix}:count", len(client_records))
+            p.set(f"{self.index_prefix}:id_seq", max_client_id)
+
+            for client in client_records:
+                if client.api_key != "revoked" and client.name:
+                    p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
+                p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+                p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
+                    "name": client.name,
+                    "api_key": client.api_key,
+                })
+
+            p.execute()
+            LOG.info(f"Redis database sync complete for '{self.index_prefix}' ({len(client_records)} clients)")
+            return True
+        except Exception as e:
+            LOG.error(f"Failed to sync Redis database: {e}")
+            return False
+
     def __len__(self) -> int:
         """
         Get the number of items in the Redis database.
@@ -662,7 +746,7 @@ class RedisDB(AbstractRemoteDB):
         for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
             try:
                 client_data = self.redis.get(client_id)
-                if not client_data or client_data == "__hivemind_creating__":
+                if not client_data or client_data == CREATE_MARKER:
                     continue
 
                 client = cast2client(client_data)
