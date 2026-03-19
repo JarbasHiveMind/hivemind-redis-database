@@ -64,6 +64,8 @@ Important note:
 
 - `name` and `subfolder` are part of the HiveMind-core database contract
 - `index_prefix` controls the actual Redis key namespace used by this backend
+- `subfolder` is accepted for compatibility, but it does not affect Redis keys
+  or data layout in this backend
 
 ### Single Redis
 
@@ -73,7 +75,6 @@ Important note:
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
       "name": "clients",
-      "subfolder": "hivemind-core",
       "host": "127.0.0.1",
       "port": 6379,
       "db": 1,
@@ -93,7 +94,6 @@ Important note:
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
       "name": "clients",
-      "subfolder": "hivemind-core",
       "cluster_nodes": [
         {"host": "redis-node1", "port": 6379},
         {"host": "redis-node2", "port": 6379},
@@ -119,7 +119,6 @@ If you are staying on legacy cluster mode temporarily, omit
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
       "name": "clients",
-      "subfolder": "hivemind-core",
       "host": "redis.example.com",
       "port": 6380,
       "use_ssl": true,
@@ -135,6 +134,9 @@ If you are staying on legacy cluster mode temporarily, omit
 
 `ssl` is still accepted as a backward-compatible alias, but `use_ssl` is the
 preferred config key in new docs and new deployments.
+
+If your HiveMind-core config already includes `subfolder`, you can leave it
+there. This backend accepts it, but does not use it for Redis namespacing.
 
 ## Configuration Reference
 
