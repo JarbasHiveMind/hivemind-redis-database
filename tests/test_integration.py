@@ -115,14 +115,20 @@ class RealRedisIntegrationTest(unittest.TestCase):
 
         client = Client(client_id=1, api_key="alpha-key", name="alpha")
         self.assertTrue(db.add_item(client))
+        if self.expect_redisearch:
+            self.assertEqual([c.name for c in db._search_with_redisearch("name", "alpha")], ["alpha"])
         self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
 
         client.name = "beta"
         client.api_key = "beta-key"
         self.assertTrue(db.update_client(client))
+        if self.expect_redisearch:
+            self.assertEqual([c.name for c in db._search_with_redisearch("name", "beta")], ["beta"])
         self.assertEqual([c.name for c in db.search_by_value("name", "beta")], ["beta"])
 
         self.assertTrue(db.remove_client(str(client.client_id)))
+        if self.expect_redisearch:
+            self.assertEqual(db._search_with_redisearch("name", "beta"), [])
         self.assertEqual(db.search_by_value("name", "beta"), [])
 
 
@@ -159,4 +165,3 @@ class ClusterRedisIntegrationTests(RealRedisIntegrationTest):
             cluster_nodes=[{"host": self.host, "port": self.port}],
         )
         self.assert_crud_flow(db, expected_cluster=True)
-
