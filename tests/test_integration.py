@@ -120,6 +120,16 @@ class RealRedisIntegrationTest(unittest.TestCase):
         self.addCleanup(self.cleanup_prefix, db)
         return db
 
+    def assert_redisearch_results(self, db, key, value, expected_names):
+        deadline = time.time() + 5
+        last_names = None
+        while time.time() < deadline:
+            last_names = [client.name for client in db._search_with_redisearch(key, value)]
+            if last_names == expected_names:
+                return
+            time.sleep(0.2)
+        self.assertEqual(last_names, expected_names)
+
     def assert_crud_flow(self, db, *, expected_cluster):
         self.assertEqual(db.is_cluster, expected_cluster)
         self.assertEqual(db.redisearch_available, self.expect_redisearch)
@@ -127,14 +137,20 @@ class RealRedisIntegrationTest(unittest.TestCase):
 
         client = Client(client_id=1, api_key="alpha-key", name="alpha")
         self.assertTrue(db.add_item(client))
+        if self.expect_redisearch:
+            self.assert_redisearch_results(db, "name", "alpha", ["alpha"])
         self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
 
         client.name = "beta"
         client.api_key = "beta-key"
         self.assertTrue(db.update_client(client))
+        if self.expect_redisearch:
+            self.assert_redisearch_results(db, "name", "beta", ["beta"])
         self.assertEqual([c.name for c in db.search_by_value("name", "beta")], ["beta"])
 
         self.assertTrue(db.remove_client(str(client.client_id)))
+        if self.expect_redisearch:
+            self.assert_redisearch_results(db, "name", "beta", [])
         self.assertEqual(db.search_by_value("name", "beta"), [])
         self.assertEqual(list(db), [])
 
