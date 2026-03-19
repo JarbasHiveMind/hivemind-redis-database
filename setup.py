@@ -58,6 +58,7 @@ def get_requirements():
 
 # Plugin entry point
 PLUGIN_ENTRY_POINT = 'hivemind-redis-db-plugin=hivemind_redis_database:RedisDB'
+MIGRATION_ENTRY_POINT = 'hivemind-redis-migrate-cluster=hivemind_redis_database.migration:main'
 
 # Get long description from README if it exists
 readme_file = Path(__file__).parent / 'README.md'
@@ -91,7 +92,10 @@ setup(
     keywords='redis hivemind database plugin',
     python_requires='>=3.10',
     install_requires=get_requirements(),
-    entry_points={'hivemind.database': PLUGIN_ENTRY_POINT},
+    entry_points={
+        'hivemind.database': [PLUGIN_ENTRY_POINT],
+        'console_scripts': [MIGRATION_ENTRY_POINT],
+    },
     include_package_data=True,
     zip_safe=False,
 )
