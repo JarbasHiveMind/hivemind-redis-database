@@ -10,6 +10,7 @@ pip install hivemind-redis-database
 
 ## Compatibility
 
+- Python 3.9 or newer
 - Redis for single-instance mode
 - Redis Cluster for cluster mode
 - Redis Stack or Redis with the RediSearch module loaded for advanced search
