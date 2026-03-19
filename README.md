@@ -45,7 +45,7 @@ Compatibility:
 | Mode | Use when | Notes |
 | --- | --- | --- |
 | Single Redis | You want the simplest production setup | Supports `db`, TLS, RediSearch, and normal Redis indexing |
-| Redis Cluster, legacy mode | You already have an existing cluster namespace | Compatible with current key layout, but multi-key writes are best-effort across slots |
+| Redis Cluster, legacy mode | You already have an existing cluster namespace | Compatible with current key layout; primary records remain authoritative and `name` / `api_key` search falls back to scans |
 | Redis Cluster with `cluster_hash_tag` | New cluster deployments | Recommended mode; keeps all keys for one namespace in one slot and enables transactional cluster pipelines |
 | Redis Stack / RediSearch | You want faster indexed search on `name` and `api_key` | Optional; fallback indexing still works without it |
 
@@ -168,6 +168,9 @@ there. This backend accepts it, but does not use it for Redis namespacing.
 - `search_by_value("name", value)` and `search_by_value("api_key", value)` use
   RediSearch when available.
 - If RediSearch is not available, the backend falls back to Redis set indexes.
+- In legacy Redis Cluster mode without `cluster_hash_tag`, the backend treats
+  primary client records as authoritative and falls back to scan-based search
+  for correctness.
 - Search remains exact-match. RediSearch is used as an accelerator, not as fuzzy
   search.
 - Revoked clients are excluded from iteration and search results so HiveMind
@@ -256,6 +259,15 @@ Notes:
   target namespace
 
 More detail is in [docs/cluster_consistency.md](docs/cluster_consistency.md).
+
+Legacy Redis Cluster note:
+
+- this mode is now correctness-first rather than index-first
+- primary client records are written directly
+- `name` / `api_key` searches fall back to scans
+- RediSearch acceleration is disabled
+- `cluster_hash_tag` remains the recommended production mode for indexed,
+  transactional cluster behavior
 
 ## Development
 

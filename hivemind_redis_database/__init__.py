@@ -91,9 +91,10 @@ class RedisDB(AbstractRemoteDB):
                 )
             else:
                 LOG.warning(
-                    "Redis Cluster mode uses multi-key writes across hash slots; "
-                    "updates are best-effort, not atomic. Run sync() to rebuild "
-                    "indexes after interrupted writes."
+                    "Redis Cluster legacy mode enabled; primary records remain "
+                    "authoritative, indexed search acceleration is disabled, and "
+                    "name/api_key lookups fall back to scans. Enable "
+                    "cluster_hash_tag for transactional indexed cluster mode."
                 )
         else:
             LOG.info("Single Redis instance detected, using standard client")
@@ -209,6 +210,10 @@ class RedisDB(AbstractRemoteDB):
         if getattr(self, "is_cluster", False) and self.cluster_hash_tag:
             return self.redis.pipeline(transaction=True)
         return self.redis.pipeline()
+
+    def _legacy_cluster_mode(self) -> bool:
+        """Return True when running on Redis Cluster without a hash-tag namespace."""
+        return bool(getattr(self, "is_cluster", False) and not self.cluster_hash_tag)
 
     def _retry_policy(self) -> redis.retry.Retry:
         """Build a shared retry policy for Redis clients."""
@@ -377,6 +382,12 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             True if RediSearch is available, False otherwise.
         """
+        if self._legacy_cluster_mode():
+            LOG.info(
+                "RediSearch is disabled in legacy Redis Cluster mode; "
+                "enable cluster_hash_tag to use indexed cluster search."
+            )
+            return False
         try:
             modules = self.redis.execute_command("MODULE", "LIST")
             for module in modules:
@@ -504,6 +515,11 @@ class RedisDB(AbstractRemoteDB):
 
             serialized_client = client.serialize()
 
+            if self._legacy_cluster_mode():
+                self.redis.set(item_key, serialized_client)
+                LOG.debug(f"Successfully added client '{client.client_id}' in legacy cluster mode")
+                return True
+
             # Use pipeline for atomic operations
             p = self._pipeline()
             p.set(item_key, serialized_client)
@@ -566,6 +582,11 @@ class RedisDB(AbstractRemoteDB):
             data['password'] = None
             data['crypto_key'] = None
 
+            if self._legacy_cluster_mode():
+                self.redis.set(item_key, json.dumps(data))
+                LOG.info(f"Successfully revoked client '{client_id}' in legacy cluster mode")
+                return True
+
             p = self._pipeline()
             p.set(item_key, json.dumps(data))
 
@@ -620,6 +641,11 @@ class RedisDB(AbstractRemoteDB):
 
             old_client = cast2client(old_client_data)
             self._ensure_client_attributes(client)
+
+            if self._legacy_cluster_mode():
+                self.redis.set(item_key, client.serialize())
+                LOG.debug(f"Successfully updated client '{client.client_id}' in legacy cluster mode")
+                return True
 
             p = self._pipeline()
             p.set(item_key, client.serialize())
@@ -723,6 +749,9 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             A list of clients that match the search criteria.
         """
+        if self._legacy_cluster_mode():
+            return self._search_brute_force(key, val)
+
         if self.redisearch_available and key in ['name', 'api_key']:
             redisearch_results = self._search_with_redisearch(key, val)
             if redisearch_results:
@@ -775,14 +804,15 @@ class RedisDB(AbstractRemoteDB):
             p.set(self._counter_key(), len(client_records))
             p.set(self._id_sequence_key(), max_client_id)
 
-            for client in client_records:
-                if client.api_key != "revoked" and client.name:
-                    p.sadd(self._name_index_key(client.name), str(client.client_id))
-                p.sadd(self._api_key_index_key(client.api_key), str(client.client_id))
-                p.hset(self._search_doc_key(client.client_id), mapping={
-                    "name": client.name,
-                    "api_key": client.api_key,
-                })
+            if not self._legacy_cluster_mode():
+                for client in client_records:
+                    if client.api_key != "revoked" and client.name:
+                        p.sadd(self._name_index_key(client.name), str(client.client_id))
+                    p.sadd(self._api_key_index_key(client.api_key), str(client.client_id))
+                    p.hset(self._search_doc_key(client.client_id), mapping={
+                        "name": client.name,
+                        "api_key": client.api_key,
+                    })
 
             p.execute()
             LOG.info(f"Redis database sync complete for '{self.index_prefix}' ({len(client_records)} clients)")
@@ -790,6 +820,15 @@ class RedisDB(AbstractRemoteDB):
         except Exception as e:
             LOG.error(f"Failed to sync Redis database: {e}")
             return False
+
+    def _count_client_records(self) -> int:
+        """Count stored client records, excluding stale create markers."""
+        count = 0
+        for batch in self._iter_key_batches(self.redis.scan_iter(self._scan_pattern("client"), count=100)):
+            for client_data in self._get_many(batch):
+                if client_data and client_data != CREATE_MARKER:
+                    count += 1
+        return count
 
     def _iter_key_batches(self, keys: Iterable[str], batch_size: int = 100) -> Iterable[List[str]]:
         """Yield keys in fixed-size batches for pipelined reads."""
@@ -841,6 +880,13 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             The number of clients in the database.
         """
+        if self._legacy_cluster_mode():
+            try:
+                return self._count_client_records()
+            except Exception as e:
+                LOG.warning(f"Failed to count client records in legacy cluster mode: {e}")
+                return 0
+
         counter_key = self._counter_key()
         try:
             count = self.redis.get(counter_key)

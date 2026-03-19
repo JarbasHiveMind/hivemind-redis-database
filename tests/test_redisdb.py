@@ -316,14 +316,26 @@ class RedisDBTests(unittest.TestCase):
     def test_redisearch_detected_from_module_list(self):
         db = object.__new__(RedisDB)
         db.redis = ModuleListRedis()
+        db.is_cluster = False
+        db.cluster_hash_tag = None
 
         self.assertTrue(db._check_redisearch_availability())
 
     def test_redisearch_falls_back_to_ft_list(self):
         db = object.__new__(RedisDB)
         db.redis = FallbackSearchRedis()
+        db.is_cluster = False
+        db.cluster_hash_tag = None
 
         self.assertTrue(db._check_redisearch_availability())
+
+    def test_redisearch_is_disabled_in_legacy_cluster_mode(self):
+        db = object.__new__(RedisDB)
+        db.redis = ModuleListRedis()
+        db.is_cluster = True
+        db.cluster_hash_tag = None
+
+        self.assertFalse(db._check_redisearch_availability())
 
     def test_redisearch_results_are_filtered_to_exact_matches(self):
         db = object.__new__(RedisDB)
@@ -364,6 +376,36 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(redis_client.smembers("client:{clients}:api_key:alpha-key"), {"1"})
         self.assertEqual(redis_client.hashes["client:{clients}:idx:1"]["name"], "alpha")
         self.assertEqual(redis_client.get("client:{clients}:count"), "1")
+
+    def test_legacy_cluster_mode_uses_primary_records_only(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client, is_cluster=True, cluster_hash_tag=None)
+
+        client = Client(client_id=1, api_key="alpha-key", name="alpha")
+
+        self.assertTrue(db.add_item(client))
+        self.assertEqual(redis_client.get("client:client:1"), client.serialize())
+        self.assertEqual(redis_client.smembers("client:name:alpha"), set())
+        self.assertEqual(redis_client.smembers("client:api_key:alpha-key"), set())
+        self.assertNotIn("client:idx:1", redis_client.hashes)
+        self.assertEqual(len(db), 1)
+        self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
+
+    def test_legacy_cluster_mode_update_and_revoke_do_not_depend_on_indexes(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client, is_cluster=True, cluster_hash_tag=None)
+
+        client = Client(client_id=1, api_key="alpha-key", name="alpha")
+        self.assertTrue(db.add_item(client))
+
+        client.name = "beta"
+        client.api_key = "beta-key"
+        self.assertTrue(db.update_client(client))
+        self.assertEqual([c.name for c in db.search_by_value("name", "beta")], ["beta"])
+
+        self.assertTrue(db.remove_client("1"))
+        self.assertEqual(db.search_by_value("name", "beta"), [])
+        self.assertEqual(len(db), 1)
 
     def test_setup_redisearch_index_uses_hash_tag_prefix(self):
         db = object.__new__(RedisDB)
