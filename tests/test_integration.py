@@ -134,6 +134,7 @@ class RealRedisIntegrationTest(unittest.TestCase):
 
         self.assertTrue(db.remove_client(str(client.client_id)))
         self.assertEqual(db.search_by_value("name", "beta"), [])
+        self.assertEqual(list(db), [])
 
 
 class WaitForServiceTests(unittest.TestCase):

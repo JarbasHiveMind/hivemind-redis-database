@@ -291,6 +291,23 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(stored.name, "fresh")
         self.assertEqual(stored.api_key, "fresh-key")
 
+    def test_iter_skips_revoked_and_in_progress_records(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+
+        active = Client(client_id=1, api_key="active-key", name="active")
+        revoked = Client(client_id=2, api_key="revoked-key", name="revoked")
+
+        self.assertTrue(db.add_item(active))
+        self.assertTrue(db.add_item(revoked))
+        self.assertTrue(db.remove_client("2"))
+
+        redis_client.storage["client:client:3"] = "__hivemind_creating__"
+
+        clients = list(db)
+
+        self.assertEqual([(client.client_id, client.api_key) for client in clients], [(1, "active-key")])
+
 
 if __name__ == "__main__":
     unittest.main()

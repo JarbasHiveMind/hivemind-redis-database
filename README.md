@@ -10,7 +10,7 @@ pip install hivemind-redis-database
 
 ## Compatibility
 
-- Python 3.9 or newer
+- Python 3.10 or newer
 - Redis for single-instance mode
 - Redis Cluster for cluster mode
 - Redis Stack or Redis with the RediSearch module loaded for advanced search
@@ -27,6 +27,8 @@ HiveMind passes these values to the plugin when it loads the database backend.
   "database": {
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
+      "name": "clients",
+      "subfolder": "hivemind-core",
       "host": "127.0.0.1",
       "port": 6379,
       "db": 1,
@@ -44,6 +46,8 @@ HiveMind passes these values to the plugin when it loads the database backend.
   "database": {
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
+      "name": "clients",
+      "subfolder": "hivemind-core",
       "cluster_nodes": [
         {"host": "redis-node1", "port": 6379},
         {"host": "redis-node2", "port": 6380},
@@ -63,6 +67,8 @@ HiveMind passes these values to the plugin when it loads the database backend.
   "database": {
     "module": "hivemind-redis-db-plugin",
     "hivemind-redis-db-plugin": {
+      "name": "clients",
+      "subfolder": "hivemind-core",
       "host": "redis.example.com",
       "port": 6380,
       "ssl": true,
@@ -78,6 +84,8 @@ HiveMind passes these values to the plugin when it loads the database backend.
 
 ### Configuration Parameters
 
+- `name`: Database name from the HiveMind-core database contract (default: "clients")
+- `subfolder`: HiveMind-core config namespace value, accepted for compatibility (default: "hivemind-core")
 - `host`: Redis server hostname (default: "127.0.0.1")
 - `port`: Redis server port (default: 6379)
 - `db`: Redis database number (default: 0)
@@ -92,6 +100,8 @@ HiveMind passes these values to the plugin when it loads the database backend.
 - `ssl_ca_certs`: Path to CA certificates file
 - `ssl_cert_reqs`: SSL certificate requirements ("required", "optional", "none") (default: "required")
 - `ssl_check_hostname`: Verify SSL hostname (default: true)
+
+Revoked clients are excluded from iteration and search results so HiveMind-core admin commands only operate on active clients.
 
 ## Usage
 

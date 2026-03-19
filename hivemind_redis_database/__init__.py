@@ -661,7 +661,14 @@ class RedisDB(AbstractRemoteDB):
         """
         for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
             try:
-                client = cast2client(self.redis.get(client_id))
+                client_data = self.redis.get(client_id)
+                if not client_data or client_data == "__hivemind_creating__":
+                    continue
+
+                client = cast2client(client_data)
+                if client.api_key == "revoked":
+                    continue
+
                 for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
                     if not hasattr(client, attr) or getattr(client, attr) is None:
                         setattr(client, attr, [])
