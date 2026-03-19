@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Union
 import json
-import ssl
 
 import redis
+from redis.cluster import ClusterNode
 from ovos_utils.log import LOG
 
 from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2client
@@ -57,6 +57,7 @@ class RedisDB(AbstractRemoteDB):
     retry_attempts: int = 3
     retry_delay: float = 0.1
     use_ssl: bool = False
+    ssl: Optional[bool] = None
     ssl_certfile: Optional[str] = None
     ssl_keyfile: Optional[str] = None
     ssl_ca_certs: Optional[str] = None
@@ -68,6 +69,7 @@ class RedisDB(AbstractRemoteDB):
         """
         Initialize the RedisDB connection with automatic cluster/single instance detection.
         """
+        self._normalize_parameters()
         self._validate_parameters()
         LOG.info("Redis database initialized with hiredis for optimal performance")
 
@@ -94,6 +96,23 @@ class RedisDB(AbstractRemoteDB):
         if not self.health_check():
             LOG.error("Redis connection health check failed during initialization")
             raise redis.ConnectionError("Failed to establish healthy Redis connection")
+
+    def _normalize_parameters(self):
+        """Normalize optional parameters and backward-compatible aliases."""
+        if self.host is None:
+            self.host = "127.0.0.1"
+        if self.port is None:
+            self.port = 6379
+        if self.db is None:
+            self.db = 0
+        if self.username is None:
+            self.username = "default"
+        if self.name is None:
+            self.name = "clients"
+        if self.index_prefix is None:
+            self.index_prefix = "client"
+        if self.ssl is not None:
+            self.use_ssl = bool(self.ssl)
 
     def _validate_parameters(self):
         """
@@ -123,33 +142,41 @@ class RedisDB(AbstractRemoteDB):
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
 
-    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+    def _get_ssl_kwargs(self) -> dict:
         """
-        Create SSL context for Redis connections.
+        Build SSL kwargs compatible with redis-py clients.
 
         Returns:
-            SSL context if SSL is enabled, None otherwise.
+            Keyword arguments for SSL-enabled Redis connections.
         """
         if not self.use_ssl:
-            return None
+            return {}
 
-        try:
-            ssl_context = ssl.create_default_context()
-            if self.ssl_ca_certs:
-                ssl_context.load_verify_locations(self.ssl_ca_certs)
-            if self.ssl_certfile and self.ssl_keyfile:
-                ssl_context.load_cert_chain(self.ssl_certfile, self.ssl_keyfile)
-            ssl_context.check_hostname = self.ssl_check_hostname
-            mode_map = {
-                "required": ssl.CERT_REQUIRED,
-                "optional": ssl.CERT_OPTIONAL,
-                "none": ssl.CERT_NONE,
-            }
-            ssl_context.verify_mode = mode_map[self.ssl_cert_reqs.lower()]
-            return ssl_context
-        except Exception as e:
-            LOG.error(f"Failed to create SSL context: {e}")
-            raise
+        ssl_kwargs = {
+            "ssl": True,
+            "ssl_cert_reqs": self.ssl_cert_reqs,
+            "ssl_check_hostname": self.ssl_check_hostname,
+        }
+        if self.ssl_certfile:
+            ssl_kwargs["ssl_certfile"] = self.ssl_certfile
+        if self.ssl_keyfile:
+            ssl_kwargs["ssl_keyfile"] = self.ssl_keyfile
+        if self.ssl_ca_certs:
+            ssl_kwargs["ssl_ca_certs"] = self.ssl_ca_certs
+        return ssl_kwargs
+
+    def _get_startup_nodes(self) -> List[ClusterNode]:
+        """Normalize startup nodes into redis-py ClusterNode objects."""
+        raw_nodes = self.cluster_nodes or [{"host": self.host, "port": self.port}]
+        startup_nodes = []
+        for node in raw_nodes:
+            if isinstance(node, ClusterNode):
+                startup_nodes.append(node)
+            elif isinstance(node, dict):
+                startup_nodes.append(ClusterNode(node["host"], int(node["port"])))
+            else:
+                raise ValueError(f"Unsupported cluster node type: {type(node)}")
+        return startup_nodes
 
     def _detect_cluster(self) -> bool:
         """
@@ -162,19 +189,18 @@ class RedisDB(AbstractRemoteDB):
             return True
 
         try:
-            ssl_context = self._create_ssl_context()
+            connection_kwargs = {
+                "host": self.host,
+                "port": self.port,
+                "password": self.password,
+                "username": self.username,
+                "db": 0,
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+            }
+            connection_kwargs.update(self._get_ssl_kwargs())
 
-            test_client = redis.StrictRedis(
-                host=self.host,
-                port=self.port,
-                password=self.password,
-                username=self.username,
-                db=0,
-                socket_connect_timeout=2,
-                socket_timeout=2,
-                ssl=self.use_ssl,
-                ssl_context=ssl_context
-            )
+            test_client = redis.StrictRedis(**connection_kwargs)
             test_client.ping()
 
             info = test_client.info('cluster')
@@ -204,27 +230,20 @@ class RedisDB(AbstractRemoteDB):
             'socket_connect_timeout': 5,
             'socket_timeout': 5,
             'health_check_interval': 30,
+            'max_connections': self.max_connections,
         }
+        connection_kwargs.update(self._get_ssl_kwargs())
 
-        ssl_context = self._create_ssl_context()
-        if self.use_ssl:
-            connection_kwargs['ssl'] = True
-            if ssl_context:
-                connection_kwargs['ssl_context'] = ssl_context
-
-        self.redis_pool = redis.ConnectionPool(
-            max_connections=self.max_connections,
-            retry_on_timeout=True,
-            **connection_kwargs
-        )
-        return redis.StrictRedis(
-            connection_pool=self.redis_pool,
+        client = redis.StrictRedis(
+            **connection_kwargs,
             retry=redis.retry.Retry(
                 redis.backoff.ExponentialBackoff(base=self.retry_delay),
                 retries=self.retry_attempts
             ),
             retry_on_error=[redis.ConnectionError, redis.TimeoutError],
         )
+        self.redis_pool = client.connection_pool
+        return client
 
     def _create_cluster_connection(self) -> redis.RedisCluster:
         """
@@ -233,27 +252,21 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             RedisCluster client instance
         """
-        if self.cluster_nodes:
-            startup_nodes = self.cluster_nodes
-        else:
-            startup_nodes = [{"host": self.host, "port": self.port}]
-
-        ssl_context = self._create_ssl_context()
+        startup_nodes = self._get_startup_nodes()
+        connection_kwargs = {
+            "startup_nodes": startup_nodes,
+            "password": self.password,
+            "username": self.username,
+            "decode_responses": True,
+            "socket_connect_timeout": 5,
+            "socket_timeout": 5,
+            "max_connections": self.max_connections,
+            "skip_full_coverage_check": True,
+        }
+        connection_kwargs.update(self._get_ssl_kwargs())
 
         try:
-            return redis.RedisCluster(
-                startup_nodes=startup_nodes,
-                password=self.password,
-                username=self.username,
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
-                max_connections=self.max_connections,
-                skip_full_coverage_check=True,
-                ssl=self.use_ssl,
-                ssl_context=ssl_context
-            )
+            return redis.RedisCluster(**connection_kwargs)
         except Exception as e:
             LOG.warning(f"Failed to create cluster connection: {e}")
             raise
@@ -266,10 +279,24 @@ class RedisDB(AbstractRemoteDB):
             True if RediSearch is available, False otherwise.
         """
         try:
-            self.redis.ft("test_index").info()
+            modules = self.redis.execute_command("MODULE", "LIST")
+            for module in modules:
+                name = None
+                if isinstance(module, dict):
+                    name = module.get("name")
+                elif isinstance(module, (list, tuple)):
+                    for i in range(0, len(module) - 1, 2):
+                        if str(module[i]).lower() == "name":
+                            name = module[i + 1]
+                            break
+                if str(name).lower() == "search":
+                    return True
+        except Exception as e:
+            LOG.debug(f"RediSearch module check failed: {e}")
+
+        try:
+            self.redis.execute_command("FT._LIST")
             return True
-        except redis.ResponseError:
-            return False
         except Exception:
             return False
 

@@ -11,6 +11,7 @@ pip install hivemind-redis-database
 ## Configuration
 
 Add to your `server.json` configuration file:
+HiveMind passes these values to the plugin when it loads the database backend.
 
 ### Single Redis Instance
 
@@ -78,7 +79,7 @@ Add to your `server.json` configuration file:
 - `cluster_nodes`: List of cluster nodes (for Redis Cluster mode)
 - `max_connections`: Maximum connection pool size (default: 5)
 - `index_prefix`: Prefix for index keys (default: "client")
-- `ssl`: Enable SSL/TLS connection (default: false)
+- `ssl` or `use_ssl`: Enable SSL/TLS connection (default: false)
 - `ssl_certfile`: Path to SSL certificate file
 - `ssl_keyfile`: Path to SSL private key file
 - `ssl_ca_certs`: Path to CA certificates file
@@ -90,8 +91,11 @@ Add to your `server.json` configuration file:
 ```python
 from hivemind_redis_database import RedisDB
 
-# Using configuration from server.json
-db = RedisDB()
+# Manual configuration for a local Redis instance
+db = RedisDB(host="127.0.0.1", port=6379)
+
+# HiveMind loads the same settings from server.json
+# and passes them to this plugin automatically.
 
 # Manual configuration with SSL
 db = RedisDB(
