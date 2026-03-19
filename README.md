@@ -53,6 +53,7 @@ HiveMind passes these values to the plugin when it loads the database backend.
         {"host": "redis-node2", "port": 6380},
         {"host": "redis-node3", "port": 6381}
       ],
+      "cluster_hash_tag": "clients",
       "password": "your_password",
       "max_connections": 20
     }
@@ -92,6 +93,7 @@ HiveMind passes these values to the plugin when it loads the database backend.
 - `password`: Redis password for authentication
 - `username`: Redis username for ACL authentication (default: "default")
 - `cluster_nodes`: List of cluster nodes (for Redis Cluster mode)
+- `cluster_hash_tag`: Optional fixed Redis Cluster hash tag for single-slot atomic writes in cluster mode
 - `max_connections`: Maximum connection pool size (default: 5)
 - `index_prefix`: Prefix for index keys (default: "client")
 - `ssl` or `use_ssl`: Enable SSL/TLS connection (default: false)
@@ -120,6 +122,7 @@ cluster_db = RedisDB(
         {"host": "redis-node1", "port": 6379},
         {"host": "redis-node2", "port": 6379},
     ],
+    cluster_hash_tag="clients",
     password="your_password",
 )
 
@@ -146,9 +149,11 @@ db = RedisDB(
 
 ## Cluster Note
 
-Redis Cluster support is functional, but the current schema still performs
-multi-key writes across slots, so cluster updates are best-effort rather than
-fully atomic. Use `sync()` to repair drift after interrupted writes.
+Redis Cluster support has two modes:
 
-The recommended production migration path for strict cluster consistency is
+- default legacy mode: compatible with existing deployments, but multi-key writes are best-effort across slots
+- `cluster_hash_tag` mode: keeps all keys for that namespace in one slot and enables transactional cluster pipelines
+
+Use `cluster_hash_tag` for new cluster deployments. The recommended migration
+path for existing cluster deployments is
 documented in [docs/cluster_consistency.md](docs/cluster_consistency.md).

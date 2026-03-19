@@ -39,6 +39,7 @@ class RedisDB(AbstractRemoteDB):
         username (Optional[str]): Redis authentication username (default: "default")
         db (Optional[int]): Redis database number for single instance
         cluster_nodes (Optional[List[dict]]): Redis Cluster node configuration
+        cluster_hash_tag (Optional[str]): Fixed Redis Cluster hash tag for single-slot writes
         index_prefix (str): Key prefix for all database operations (default: "client")
         max_connections (int): Maximum connection pool size (default: 5)
         retry_attempts (int): Number of retry attempts (default: 3)
@@ -57,6 +58,7 @@ class RedisDB(AbstractRemoteDB):
     username: Optional[str] = "default"
     db: Optional[int] = 0
     cluster_nodes: Optional[List[dict]] = None
+    cluster_hash_tag: Optional[str] = None
     index_prefix: str = "client"
     max_connections: int = 5
     retry_attempts: int = 3
@@ -82,16 +84,22 @@ class RedisDB(AbstractRemoteDB):
         if self.is_cluster:
             LOG.info("Redis Cluster detected, using cluster client")
             self.redis = self._create_cluster_connection()
-            LOG.warning(
-                "Redis Cluster mode uses multi-key writes across hash slots; "
-                "updates are best-effort, not atomic. Run sync() to rebuild "
-                "indexes after interrupted writes."
-            )
+            if self.cluster_hash_tag:
+                LOG.info(
+                    "Redis Cluster hash-tag mode enabled; multi-key writes use "
+                    "single-slot transactions for this namespace"
+                )
+            else:
+                LOG.warning(
+                    "Redis Cluster mode uses multi-key writes across hash slots; "
+                    "updates are best-effort, not atomic. Run sync() to rebuild "
+                    "indexes after interrupted writes."
+                )
         else:
             LOG.info("Single Redis instance detected, using standard client")
             self.redis = self._create_single_connection()
 
-        counter_key = f"{self.index_prefix}:count"
+        counter_key = self._counter_key()
         if self.redis.setnx(counter_key, 0):
             LOG.debug(f"Initialized client counter to 0 for {self.index_prefix}")
 
@@ -120,6 +128,10 @@ class RedisDB(AbstractRemoteDB):
             self.name = "clients"
         if self.index_prefix is None:
             self.index_prefix = "client"
+        if isinstance(self.cluster_hash_tag, str):
+            self.cluster_hash_tag = self.cluster_hash_tag.strip()
+        if self.cluster_hash_tag == "":
+            self.cluster_hash_tag = None
         if self.ssl is not None:
             self.use_ssl = bool(self.ssl)
 
@@ -148,8 +160,55 @@ class RedisDB(AbstractRemoteDB):
         if self.password and not isinstance(self.password, str):
             raise ValueError(f"Password must be a string, got {type(self.password)}")
 
+        if self.cluster_hash_tag is not None:
+            if not isinstance(self.cluster_hash_tag, str) or not self.cluster_hash_tag.strip():
+                raise ValueError("cluster_hash_tag must be a non-empty string when provided")
+            if "{" in self.cluster_hash_tag or "}" in self.cluster_hash_tag:
+                raise ValueError("cluster_hash_tag cannot contain '{' or '}'")
+
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
+
+    def _base_prefix(self) -> str:
+        """Return the active Redis namespace prefix."""
+        if self.cluster_hash_tag:
+            return f"{self.index_prefix}:{{{self.cluster_hash_tag}}}"
+        return self.index_prefix
+
+    def _key(self, *parts: Union[str, int]) -> str:
+        """Build a Redis key within the active namespace."""
+        return ":".join([self._base_prefix(), *[str(part) for part in parts]])
+
+    def _client_key(self, client_id: Union[str, int]) -> str:
+        return self._key("client", client_id)
+
+    def _name_index_key(self, name: str) -> str:
+        return self._key("name", name)
+
+    def _api_key_index_key(self, api_key: str) -> str:
+        return self._key("api_key", api_key)
+
+    def _search_doc_key(self, client_id: Union[str, int]) -> str:
+        return self._key("idx", client_id)
+
+    def _counter_key(self) -> str:
+        return self._key("count")
+
+    def _id_sequence_key(self) -> str:
+        return self._key("id_seq")
+
+    def _search_index_name(self) -> str:
+        if self.cluster_hash_tag:
+            return f"{self.index_prefix}_{self.cluster_hash_tag}_search_index"
+        return f"{self.index_prefix}_search_index"
+
+    def _scan_pattern(self, *parts: Union[str, int]) -> str:
+        return f"{self._key(*parts)}:*"
+
+    def _pipeline(self):
+        if getattr(self, "is_cluster", False) and self.cluster_hash_tag:
+            return self.redis.pipeline(transaction=True)
+        return self.redis.pipeline()
 
     def _get_ssl_kwargs(self) -> dict:
         """
@@ -318,11 +377,11 @@ class RedisDB(AbstractRemoteDB):
         Set up RediSearch index for clients if available.
         """
         try:
-            index_name = f"{self.index_prefix}_search_index"
+            index_name = self._search_index_name()
             self.redis.execute_command(
                 "FT.CREATE", index_name,
                 "ON", "HASH",
-                "PREFIX", "1", f"{self.index_prefix}:idx:",
+                "PREFIX", "1", f"{self._key('idx')}:",
                 "SCHEMA",
                 "name", "TEXT",
                 "api_key", "TEXT"
@@ -343,7 +402,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             The next available client ID
         """
-        return int(self.redis.incr(f"{self.index_prefix}:id_seq"))
+        return int(self.redis.incr(self._id_sequence_key()))
 
     def _claim_item_key(self, item_key: str) -> bool:
         """
@@ -391,7 +450,7 @@ class RedisDB(AbstractRemoteDB):
             marker_waits = 0
 
             while True:
-                item_key = f"{self.index_prefix}:client:{client.client_id}"
+                item_key = self._client_key(client.client_id)
                 if self._claim_item_key(item_key):
                     claimed_key = item_key
                     break
@@ -419,16 +478,16 @@ class RedisDB(AbstractRemoteDB):
             serialized_client = client.serialize()
 
             # Use pipeline for atomic operations
-            p = self.redis.pipeline()
+            p = self._pipeline()
             p.set(item_key, serialized_client)
-            p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
-            p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+            p.sadd(self._name_index_key(client.name), str(client.client_id))
+            p.sadd(self._api_key_index_key(client.api_key), str(client.client_id))
             # Feed RediSearch doc
-            p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
+            p.hset(self._search_doc_key(client.client_id), mapping={
                 "name": client.name,
                 "api_key": client.api_key,
             })
-            p.incr(f"{self.index_prefix}:count")
+            p.incr(self._counter_key())
             p.execute()
             
             LOG.debug(f"Successfully added client '{client.client_id}'")
@@ -463,7 +522,7 @@ class RedisDB(AbstractRemoteDB):
             True if the revocation was successful, False otherwise.
         """
         try:
-            item_key = f"{self.index_prefix}:client:{client_id}"
+            item_key = self._client_key(client_id)
             client_data = self.redis.get(item_key)
             if not client_data:
                 LOG.warning(f"Client '{client_id}' not found for revocation")
@@ -480,15 +539,15 @@ class RedisDB(AbstractRemoteDB):
             data['password'] = None
             data['crypto_key'] = None
 
-            p = self.redis.pipeline()
+            p = self._pipeline()
             p.set(item_key, json.dumps(data))
 
             # Update indices
-            p.srem(f"{self.index_prefix}:name:{old_name}", client_id)
-            p.srem(f"{self.index_prefix}:api_key:{old_api_key}", client_id)
-            p.sadd(f"{self.index_prefix}:api_key:revoked", client_id)
+            p.srem(self._name_index_key(old_name), client_id)
+            p.srem(self._api_key_index_key(old_api_key), client_id)
+            p.sadd(self._api_key_index_key("revoked"), client_id)
             # Update RediSearch doc
-            p.hset(f"{self.index_prefix}:idx:{client_id}", mapping={
+            p.hset(self._search_doc_key(client_id), mapping={
                 "name": "",
                 "api_key": "revoked",
             })
@@ -526,7 +585,7 @@ class RedisDB(AbstractRemoteDB):
             True if the update was successful, False otherwise.
         """
         try:
-            item_key = f"{self.index_prefix}:client:{client.client_id}"
+            item_key = self._client_key(client.client_id)
             old_client_data = self.redis.get(item_key)
             if not old_client_data:
                 LOG.warning(f"Client '{client.client_id}' not found for update")
@@ -535,18 +594,18 @@ class RedisDB(AbstractRemoteDB):
             old_client = cast2client(old_client_data)
             self._ensure_client_attributes(client)
 
-            p = self.redis.pipeline()
+            p = self._pipeline()
             p.set(item_key, client.serialize())
             
             # Update indices only if values changed
             if old_client.name != client.name:
-                p.srem(f"{self.index_prefix}:name:{old_client.name}", str(client.client_id))
-                p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
+                p.srem(self._name_index_key(old_client.name), str(client.client_id))
+                p.sadd(self._name_index_key(client.name), str(client.client_id))
             if old_client.api_key != client.api_key:
-                p.srem(f"{self.index_prefix}:api_key:{old_client.api_key}", str(client.client_id))
-                p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
+                p.srem(self._api_key_index_key(old_client.api_key), str(client.client_id))
+                p.sadd(self._api_key_index_key(client.api_key), str(client.client_id))
             # Update RediSearch doc
-            p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
+            p.hset(self._search_doc_key(client.client_id), mapping={
                 "name": client.name,
                 "api_key": client.api_key,
             })
@@ -570,7 +629,7 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         try:
-            index_name = f"{self.index_prefix}_search_index"
+            index_name = self._search_index_name()
             def _esc(v: str) -> str:
                 return v.replace('\\', '\\\\').replace('"', '\\"').replace(':', '\\:')
             query = f'@{key}:"{_esc(str(val))}"'
@@ -579,9 +638,9 @@ class RedisDB(AbstractRemoteDB):
             if results and len(results) > 1:
                 for i in range(1, len(results), 2):
                     doc_key = results[i]
-                    if doc_key.startswith(f"{self.index_prefix}:idx:"):
+                    if doc_key.startswith(f"{self._key('idx')}:"):
                         client_id = doc_key.split(":")[-1]
-                        client_key = f"{self.index_prefix}:client:{client_id}"
+                        client_key = self._client_key(client_id)
                         client_data = self.redis.get(client_key)
                         if client_data:
                             try:
@@ -606,11 +665,11 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
-        client_ids = self.redis.smembers(f"{self.index_prefix}:{key}:{val}")
+        client_ids = self.redis.smembers(self._key(key, val))
         res = []
         for cid in client_ids:
             try:
-                client_data = self.redis.get(f"{self.index_prefix}:client:{cid}")
+                client_data = self.redis.get(self._client_key(cid))
                 if client_data:
                     client = cast2client(client_data)
                     if client.api_key != "revoked":
@@ -632,7 +691,7 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         res = []
-        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
+        for client_id in self.redis.scan_iter(self._scan_pattern("client"), count=100):
             try:
                 client_data = self.redis.get(client_id)
                 if client_data:
@@ -677,7 +736,7 @@ class RedisDB(AbstractRemoteDB):
 
             client_records = []
             max_client_id = 0
-            for item_key in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
+            for item_key in self.redis.scan_iter(self._scan_pattern("client"), count=100):
                 client_data = self.redis.get(item_key)
                 if not client_data:
                     continue
@@ -694,24 +753,24 @@ class RedisDB(AbstractRemoteDB):
 
             index_keys = []
             for pattern in (
-                f"{self.index_prefix}:name:*",
-                f"{self.index_prefix}:api_key:*",
-                f"{self.index_prefix}:idx:*",
+                self._scan_pattern("name"),
+                self._scan_pattern("api_key"),
+                self._scan_pattern("idx"),
             ):
                 index_keys.extend(list(self.redis.scan_iter(pattern, count=100)))
 
-            p = self.redis.pipeline()
+            p = self._pipeline()
             for key in index_keys:
                 p.delete(key)
 
-            p.set(f"{self.index_prefix}:count", len(client_records))
-            p.set(f"{self.index_prefix}:id_seq", max_client_id)
+            p.set(self._counter_key(), len(client_records))
+            p.set(self._id_sequence_key(), max_client_id)
 
             for client in client_records:
                 if client.api_key != "revoked" and client.name:
-                    p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
-                p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
-                p.hset(f"{self.index_prefix}:idx:{client.client_id}", mapping={
+                    p.sadd(self._name_index_key(client.name), str(client.client_id))
+                p.sadd(self._api_key_index_key(client.api_key), str(client.client_id))
+                p.hset(self._search_doc_key(client.client_id), mapping={
                     "name": client.name,
                     "api_key": client.api_key,
                 })
@@ -730,7 +789,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             The number of clients in the database.
         """
-        counter_key = f"{self.index_prefix}:count"
+        counter_key = self._counter_key()
         try:
             count = self.redis.get(counter_key)
             if count is not None:
@@ -748,7 +807,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             An iterator over the clients in the database.
         """
-        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
+        for client_id in self.redis.scan_iter(self._scan_pattern("client"), count=100):
             try:
                 client_data = self.redis.get(client_id)
                 if not client_data or client_data == CREATE_MARKER:

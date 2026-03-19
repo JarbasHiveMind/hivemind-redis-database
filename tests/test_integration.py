@@ -77,9 +77,9 @@ class RealRedisIntegrationTest(unittest.TestCase):
     def make_prefix(self, suffix):
         return f"ci_{self.MODE}_{suffix}_{uuid4().hex[:8]}"
 
-    def cleanup_prefix(self, db, prefix):
+    def cleanup_prefix(self, db):
         try:
-            for key in list(db.redis.scan_iter(f"{prefix}:*", count=100)):
+            for key in list(db.redis.scan_iter(f"{db._base_prefix()}:*", count=100)):
                 try:
                     db.redis.delete(key)
                 except Exception:
@@ -88,7 +88,7 @@ class RealRedisIntegrationTest(unittest.TestCase):
             pass
 
         try:
-            db.redis.execute_command("FT.DROPINDEX", f"{prefix}_search_index", "DD")
+            db.redis.execute_command("FT.DROPINDEX", db._search_index_name(), "DD")
         except Exception:
             pass
 
@@ -97,7 +97,7 @@ class RealRedisIntegrationTest(unittest.TestCase):
         except Exception:
             pass
 
-    def build_db(self, prefix, *, ssl_alias=False, cluster_nodes=None):
+    def build_db(self, prefix, *, ssl_alias=False, cluster_nodes=None, cluster_hash_tag=None):
         kwargs = {
             "host": self.host,
             "port": self.port,
@@ -109,13 +109,15 @@ class RealRedisIntegrationTest(unittest.TestCase):
             kwargs.pop("host")
             kwargs.pop("port")
             kwargs["cluster_nodes"] = cluster_nodes
+        if cluster_hash_tag is not None:
+            kwargs["cluster_hash_tag"] = cluster_hash_tag
         if self.use_ssl:
             ssl_flag = "ssl" if ssl_alias else "use_ssl"
             kwargs[ssl_flag] = True
             kwargs["ssl_ca_certs"] = self.ca_cert
             kwargs["ssl_check_hostname"] = True
         db = RedisDB(**kwargs)
-        self.addCleanup(self.cleanup_prefix, db, prefix)
+        self.addCleanup(self.cleanup_prefix, db)
         return db
 
     def assert_crud_flow(self, db, *, expected_cluster):
@@ -197,5 +199,12 @@ class ClusterRedisIntegrationTests(RealRedisIntegrationTest):
         db = self.build_db(
             self.make_prefix("cluster-nodes"),
             cluster_nodes=[{"host": self.host, "port": self.port}],
+        )
+        self.assert_crud_flow(db, expected_cluster=True)
+
+    def test_cluster_with_hash_tag_namespace(self):
+        db = self.build_db(
+            self.make_prefix("cluster-tag"),
+            cluster_hash_tag="clients",
         )
         self.assert_crud_flow(db, expected_cluster=True)

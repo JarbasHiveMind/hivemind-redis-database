@@ -11,7 +11,7 @@ This backend stores one logical client across multiple Redis keys:
 - `client:count`
 - `client:id_seq`
 
-In Redis Cluster, those keys map to different hash slots by default. Current
+In Redis Cluster, those keys map to different hash slots by default. Legacy
 cluster mode therefore works, but multi-key writes are not atomic. A failure in
 the middle of `add_item()`, `update_client()`, or `remove_client()` can leave
 indexes or counters temporarily inconsistent.
@@ -19,12 +19,16 @@ indexes or counters temporarily inconsistent.
 The backend now has `sync()` to repair drift, but `sync()` is a recovery tool,
 not a transaction boundary.
 
+The backend now also supports an optional `cluster_hash_tag` setting. When
+enabled, all keys for that namespace are stored in the same Redis Cluster slot
+and writes use `RedisCluster.pipeline(transaction=True)`.
+
 ## Smallest Safe Production Migration
 
 The safest next step is not a broad redesign. It is a targeted schema update
 for cluster deployments:
 
-1. Introduce an optional fixed cluster hash tag, for example `cluster_hash_tag="clients"`.
+1. Enable a fixed cluster hash tag, for example `cluster_hash_tag="clients"`.
 2. Generate all Redis keys for that deployment under the same slot, for example:
    - `client:{clients}:client:1`
    - `client:{clients}:name:alpha`
@@ -32,7 +36,7 @@ for cluster deployments:
    - `client:{clients}:idx:1`
    - `client:{clients}:count`
    - `client:{clients}:id_seq`
-3. In cluster mode with that tag enabled, use `RedisCluster.pipeline(transaction=True)`.
+3. In cluster mode with that tag enabled, the backend uses `RedisCluster.pipeline(transaction=True)`.
 
 Because every key shares the same hash tag, all commands map to the same slot.
 That is the minimum change that allows real Redis Cluster transactions for this
@@ -49,9 +53,8 @@ schema.
 
 ## Recommended Rollout
 
-1. Ship support for `cluster_hash_tag` as an opt-in configuration.
-2. Keep the legacy key layout as the default for backward compatibility.
-3. Migrate existing cluster deployments during a maintenance window:
+1. Keep the legacy key layout as the default for backward compatibility.
+2. Migrate existing cluster deployments during a maintenance window:
    - stop writers
    - snapshot the Redis namespace
    - scan legacy `client:client:*` records
@@ -59,7 +62,7 @@ schema.
    - run `sync()` on the new namespace
    - validate `len(db)`, `search_by_value("name", ...)`, and `search_by_value("api_key", ...)`
    - switch production config to the tagged namespace
-4. Keep the legacy namespace for rollback until the new deployment is stable.
+3. Keep the legacy namespace for rollback until the new deployment is stable.
 
 ## What Not To Do
 
@@ -71,6 +74,6 @@ schema.
 
 ## Practical Recommendation
 
-For this PR, keep the current schema and use the new `sync()` recovery path.
-For the next production-focused cluster release, add optional same-slot
-namespacing with a fixed hash tag and migrate cluster users deliberately.
+For new cluster deployments, enable `cluster_hash_tag` from the start.
+For existing cluster deployments, migrate deliberately and keep `sync()` as the
+repair path during rollout.

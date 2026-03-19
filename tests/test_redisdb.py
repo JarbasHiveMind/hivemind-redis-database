@@ -2,7 +2,7 @@ import unittest
 from fnmatch import fnmatch
 from unittest.mock import Mock, patch
 
-from redis.cluster import ClusterNode
+from redis.cluster import ClusterNode, key_slot
 
 from hivemind_plugin_manager import DatabaseFactory
 from hivemind_plugin_manager.database import Client
@@ -14,6 +14,7 @@ class FakeRedis:
         self.storage = {}
         self.hashes = {}
         self.connection_pool = Mock()
+        self.pipeline_transaction_flags = []
 
     def exists(self, key):
         return key in self.storage or key in self.hashes
@@ -78,7 +79,8 @@ class FakeRedis:
             if fnmatch(key, pattern):
                 yield key
 
-    def pipeline(self):
+    def pipeline(self, transaction=False):
+        self.pipeline_transaction_flags.append(transaction)
         return FakePipeline(self)
 
     def ping(self):
@@ -155,12 +157,14 @@ class SearchRedis:
 
 
 class RedisDBTests(unittest.TestCase):
-    def build_db(self, redis_client):
+    def build_db(self, redis_client, *, is_cluster=False, cluster_hash_tag=None):
         db = object.__new__(RedisDB)
         db.redis = redis_client
         db.redis_pool = redis_client.connection_pool
         db.index_prefix = "client"
         db.redisearch_available = False
+        db.is_cluster = is_cluster
+        db.cluster_hash_tag = cluster_hash_tag
         return db
 
     def test_database_factory_defaults_are_normalized(self):
@@ -193,6 +197,7 @@ class RedisDBTests(unittest.TestCase):
     def test_get_startup_nodes_accepts_documented_dict_shape(self):
         db = object.__new__(RedisDB)
         db.cluster_nodes = [{"host": "redis-node1", "port": 6379}]
+        db.cluster_hash_tag = None
         db.host = "127.0.0.1"
         db.port = 6379
 
@@ -262,10 +267,53 @@ class RedisDBTests(unittest.TestCase):
         db = object.__new__(RedisDB)
         db.redis = SearchRedis()
         db.index_prefix = "client"
+        db.cluster_hash_tag = None
 
         results = db._search_with_redisearch("name", "alpha")
 
         self.assertEqual([(client.client_id, client.name) for client in results], [(2, "alpha")])
+
+    def test_cluster_hash_tag_places_keys_in_one_slot(self):
+        db = object.__new__(RedisDB)
+        db.index_prefix = "client"
+        db.cluster_hash_tag = "clients"
+
+        slots = {
+            key_slot(db._client_key(1).encode()),
+            key_slot(db._name_index_key("alpha").encode()),
+            key_slot(db._api_key_index_key("alpha-key").encode()),
+            key_slot(db._search_doc_key(1).encode()),
+            key_slot(db._counter_key().encode()),
+            key_slot(db._id_sequence_key().encode()),
+        }
+
+        self.assertEqual(len(slots), 1)
+
+    def test_cluster_hash_tag_uses_transactional_pipeline_and_namespaced_keys(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client, is_cluster=True, cluster_hash_tag="clients")
+
+        client = Client(client_id=1, api_key="alpha-key", name="alpha")
+
+        self.assertTrue(db.add_item(client))
+        self.assertTrue(redis_client.pipeline_transaction_flags[-1])
+        self.assertEqual(redis_client.get("client:{clients}:client:1"), client.serialize())
+        self.assertEqual(redis_client.smembers("client:{clients}:name:alpha"), {"1"})
+        self.assertEqual(redis_client.smembers("client:{clients}:api_key:alpha-key"), {"1"})
+        self.assertEqual(redis_client.hashes["client:{clients}:idx:1"]["name"], "alpha")
+        self.assertEqual(redis_client.get("client:{clients}:count"), "1")
+
+    def test_setup_redisearch_index_uses_hash_tag_prefix(self):
+        db = object.__new__(RedisDB)
+        db.redis = Mock()
+        db.index_prefix = "client"
+        db.cluster_hash_tag = "clients"
+
+        db._setup_redisearch_index()
+
+        args = db.redis.execute_command.call_args.args
+        self.assertEqual(args[1], "client_clients_search_index")
+        self.assertEqual(args[6], "client:{clients}:idx:")
 
     def test_crud_flow_updates_indexes_and_revocation_state(self):
         redis_client = FakeRedis()
