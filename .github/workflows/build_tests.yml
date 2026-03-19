@@ -27,13 +27,18 @@ jobs:
           python -m build --wheel
       - name: Install package
         run: |
-          pip install .
+          pip install dist/*.whl
       - name: Import package
         run: |
-          python -c "import hivemind_redis_database"
+          cd "$RUNNER_TEMP"
+          python -I -c "import hivemind_redis_database"
       - name: Run unit tests
         run: |
-          python -m unittest discover -s tests -p 'test_redisdb.py' -v
+          TEST_ROOT="$RUNNER_TEMP/wheel-tests"
+          mkdir -p "$TEST_ROOT/tests"
+          cp tests/test_redisdb.py "$TEST_ROOT/tests/"
+          cd "$TEST_ROOT"
+          python -I -m unittest discover -s tests -p 'test_redisdb.py' -v
 
   integration_tests:
     name: Integration Tests
