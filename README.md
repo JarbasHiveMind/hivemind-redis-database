@@ -8,6 +8,12 @@ Redis database plugin for HiveMind with consistent indexing, RediSearch support,
 pip install hivemind-redis-database
 ```
 
+## Compatibility
+
+- Redis for single-instance mode
+- Redis Cluster for cluster mode
+- Redis Stack or Redis with the RediSearch module loaded for advanced search
+
 ## Configuration
 
 Add to your `server.json` configuration file:
@@ -96,6 +102,15 @@ db = RedisDB(host="127.0.0.1", port=6379)
 
 # HiveMind loads the same settings from server.json
 # and passes them to this plugin automatically.
+
+# Cluster via explicit startup nodes
+cluster_db = RedisDB(
+    cluster_nodes=[
+        {"host": "redis-node1", "port": 6379},
+        {"host": "redis-node2", "port": 6379},
+    ],
+    password="your_password",
+)
 
 # Manual configuration with SSL
 db = RedisDB(

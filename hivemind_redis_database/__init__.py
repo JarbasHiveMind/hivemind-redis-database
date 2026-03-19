@@ -82,8 +82,7 @@ class RedisDB(AbstractRemoteDB):
             self.redis = self._create_single_connection()
 
         counter_key = f"{self.index_prefix}:count"
-        if not self.redis.exists(counter_key):
-            self.redis.setnx(counter_key, 0)
+        if self.redis.setnx(counter_key, 0):
             LOG.debug(f"Initialized client counter to 0 for {self.index_prefix}")
 
         self.redisearch_available = self._check_redisearch_availability()
@@ -152,10 +151,14 @@ class RedisDB(AbstractRemoteDB):
         if not self.use_ssl:
             return {}
 
+        check_hostname = self.ssl_check_hostname
+        if self.ssl_cert_reqs == "none":
+            check_hostname = False
+
         ssl_kwargs = {
             "ssl": True,
             "ssl_cert_reqs": self.ssl_cert_reqs,
-            "ssl_check_hostname": self.ssl_check_hostname,
+            "ssl_check_hostname": check_hostname,
         }
         if self.ssl_certfile:
             ssl_kwargs["ssl_certfile"] = self.ssl_certfile
@@ -579,7 +582,7 @@ class RedisDB(AbstractRemoteDB):
             List of matching clients
         """
         res = []
-        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
+        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
             try:
                 client_data = self.redis.get(client_id)
                 if client_data:
@@ -637,7 +640,7 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             An iterator over the clients in the database.
         """
-        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*"):
+        for client_id in self.redis.scan_iter(f"{self.index_prefix}:client:*", count=100):
             try:
                 client = cast2client(self.redis.get(client_id))
                 for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
