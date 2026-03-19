@@ -158,7 +158,27 @@ Use `cluster_hash_tag` for new cluster deployments. The recommended migration
 path for existing cluster deployments is
 documented in [docs/cluster_consistency.md](docs/cluster_consistency.md).
 
-To migrate an existing cluster namespace into a tagged namespace, use:
+For an existing Redis Cluster deployment, do not just flip `cluster_hash_tag`
+in place. Migrate the namespace first:
+
+1. Stop HiveMind writers for a short maintenance window.
+2. Back up the current Redis namespace.
+3. Run a dry run to confirm the source and target namespaces.
+4. Run the migration command to copy records into the tagged namespace.
+5. Update `server.json` to set `cluster_hash_tag`.
+6. Restart HiveMind and smoke-test add/get/update/revoke/search behavior.
+7. Keep the legacy namespace for rollback until the new deployment is stable.
+
+Dry run:
+
+```bash
+hivemind-redis-migrate-cluster \
+  --config ~/.config/hivemind-core/server.json \
+  --target-cluster-hash-tag clients \
+  --dry-run
+```
+
+Migration command:
 
 ```bash
 hivemind-redis-migrate-cluster \
