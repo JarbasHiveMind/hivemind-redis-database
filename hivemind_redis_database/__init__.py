@@ -82,6 +82,11 @@ class RedisDB(AbstractRemoteDB):
         if self.is_cluster:
             LOG.info("Redis Cluster detected, using cluster client")
             self.redis = self._create_cluster_connection()
+            LOG.warning(
+                "Redis Cluster mode uses multi-key writes across hash slots; "
+                "updates are best-effort, not atomic. Run sync() to rebuild "
+                "indexes after interrupted writes."
+            )
         else:
             LOG.info("Single Redis instance detected, using standard client")
             self.redis = self._create_single_connection()

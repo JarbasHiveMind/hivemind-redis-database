@@ -143,3 +143,12 @@ db = RedisDB(
 - ✅ **SSL/TLS Support**: Secure connections with certificate validation
 - ✅ **Multi-Hub Support**: Configurable key prefixes for multiple instances
 - ✅ **Production Ready**: Comprehensive error handling and logging
+
+## Cluster Note
+
+Redis Cluster support is functional, but the current schema still performs
+multi-key writes across slots, so cluster updates are best-effort rather than
+fully atomic. Use `sync()` to repair drift after interrupted writes.
+
+The recommended production migration path for strict cluster consistency is
+documented in [docs/cluster_consistency.md](docs/cluster_consistency.md).
