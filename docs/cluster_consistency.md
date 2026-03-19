@@ -64,6 +64,26 @@ schema.
    - switch production config to the tagged namespace
 3. Keep the legacy namespace for rollback until the new deployment is stable.
 
+## Migration Tool
+
+This repository now ships a helper command:
+
+```bash
+hivemind-redis-migrate-cluster \
+  --config ~/.config/hivemind-core/server.json \
+  --target-cluster-hash-tag clients \
+  --clear-target
+```
+
+What it does:
+
+- reads the existing HiveMind Redis plugin config
+- copies raw client records from the source namespace to the target namespace
+- skips stale in-progress create markers
+- runs `sync()` on the target namespace to rebuild indexes, counters, and search hashes
+
+Use `--dry-run` first if you want to inspect the plan without writing data.
+
 ## What Not To Do
 
 - Do not try to fake atomicity across cluster slots with ordinary pipelines.

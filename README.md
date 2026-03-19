@@ -157,3 +157,12 @@ Redis Cluster support has two modes:
 Use `cluster_hash_tag` for new cluster deployments. The recommended migration
 path for existing cluster deployments is
 documented in [docs/cluster_consistency.md](docs/cluster_consistency.md).
+
+To migrate an existing cluster namespace into a tagged namespace, use:
+
+```bash
+hivemind-redis-migrate-cluster \
+  --config ~/.config/hivemind-core/server.json \
+  --target-cluster-hash-tag clients \
+  --clear-target
+```
