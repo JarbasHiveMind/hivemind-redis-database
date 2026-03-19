@@ -31,6 +31,16 @@ class FakeRedis:
     def get(self, key):
         return self.storage.get(key)
 
+    def delete(self, key):
+        removed = 0
+        if key in self.storage:
+            del self.storage[key]
+            removed += 1
+        if key in self.hashes:
+            del self.hashes[key]
+            removed += 1
+        return removed
+
     def incr(self, key):
         value = int(self.storage.get(key, 0)) + 1
         self.storage[key] = str(value)
@@ -263,6 +273,23 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(stored.name, "second")
         self.assertEqual(stored.api_key, "key-2")
         self.assertEqual(len(db), 1)
+
+    def test_add_item_retries_generated_client_id_collision(self):
+        redis_client = FakeRedis()
+        redis_client.storage["client:client:1"] = Client(client_id=1, api_key="taken", name="taken").serialize()
+        db = self.build_db(redis_client)
+        db.retry_delay = 0
+
+        created = Client(client_id=99, api_key="fresh-key", name="fresh")
+        created.client_id = None
+
+        self.assertTrue(db.add_item(created))
+        self.assertEqual(created.client_id, 2)
+
+        stored = Client.deserialize(redis_client.get("client:client:2"))
+        self.assertEqual(stored.client_id, 2)
+        self.assertEqual(stored.name, "fresh")
+        self.assertEqual(stored.api_key, "fresh-key")
 
 
 if __name__ == "__main__":

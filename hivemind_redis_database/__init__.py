@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Union
 import json
+import time
 
 import redis
 from redis.cluster import ClusterNode
@@ -345,34 +346,50 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             True if the client was added/updated successfully, False otherwise.
         """
+        create_marker = "__hivemind_creating__"
+        claimed_key = None
         try:
+            raw_client_id = getattr(client, "client_id", None)
+            client_id_was_provided = isinstance(raw_client_id, int)
+
             # Ensure client has a valid ID
             if not hasattr(client, 'client_id') or client.client_id is None:
                 client.client_id = self._get_next_client_id()
             elif isinstance(client.client_id, str):
                 try:
                     client.client_id = int(client.client_id)
+                    client_id_was_provided = True
                 except ValueError:
                     client.client_id = self._get_next_client_id()
             elif not isinstance(client.client_id, int):
                 client.client_id = self._get_next_client_id()
 
-            # Check if client already exists - if so, update it instead of creating new
-            item_key = f"{self.index_prefix}:client:{client.client_id}"
-            if self.redis.exists(item_key):
-                LOG.debug(f"Client '{client.client_id}' already exists, updating instead of creating new")
-                return self.update_client(client)
-
-            # For new clients, ensure ID is unique
-            while self.redis.exists(f"{self.index_prefix}:client:{client.client_id}"):
-                client.client_id = self._get_next_client_id()
-
             # Ensure client attributes are initialized
             self._ensure_client_attributes(client)
+            retry_delay = getattr(self, "retry_delay", 0.1)
+
+            while True:
+                item_key = f"{self.index_prefix}:client:{client.client_id}"
+                if self.redis.setnx(item_key, create_marker):
+                    claimed_key = item_key
+                    break
+
+                existing_data = self.redis.get(item_key)
+                if existing_data == create_marker:
+                    time.sleep(retry_delay)
+                    continue
+
+                if client_id_was_provided:
+                    LOG.debug(f"Client '{client.client_id}' already exists, updating instead of creating new")
+                    return self.update_client(client)
+
+                client.client_id = self._get_next_client_id()
+
+            serialized_client = client.serialize()
 
             # Use pipeline for atomic operations
             p = self.redis.pipeline()
-            p.set(f"{self.index_prefix}:client:{client.client_id}", client.serialize())
+            p.set(item_key, serialized_client)
             p.sadd(f"{self.index_prefix}:name:{client.name}", str(client.client_id))
             p.sadd(f"{self.index_prefix}:api_key:{client.api_key}", str(client.client_id))
             # Feed RediSearch doc
@@ -386,6 +403,8 @@ class RedisDB(AbstractRemoteDB):
             LOG.debug(f"Successfully added client '{client.client_id}'")
             return True
         except Exception as e:
+            if claimed_key and self.redis.get(claimed_key) == create_marker:
+                self.redis.delete(claimed_key)
             LOG.error(f"Failed to add client: {e}")
             return False
 

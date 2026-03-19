@@ -1,6 +1,7 @@
 import os
 import time
 import unittest
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import redis
@@ -35,11 +36,20 @@ class RealRedisIntegrationTest(unittest.TestCase):
         while time.time() < deadline:
             try:
                 if cls.MODE == "cluster":
-                    client = redis.RedisCluster(
-                        startup_nodes=[ClusterNode(cls.host, cls.port)],
-                        decode_responses=True,
-                        skip_full_coverage_check=True,
-                    )
+                    kwargs = {
+                        "startup_nodes": [ClusterNode(cls.host, cls.port)],
+                        "decode_responses": True,
+                        "skip_full_coverage_check": True,
+                        "password": cls.password,
+                        "username": cls.username,
+                    }
+                    if cls.use_ssl:
+                        kwargs.update({
+                            "ssl": True,
+                            "ssl_ca_certs": cls.ca_cert,
+                            "ssl_check_hostname": True,
+                        })
+                    client = redis.RedisCluster(**kwargs)
                 else:
                     kwargs = {
                         "host": cls.host,
@@ -130,6 +140,35 @@ class RealRedisIntegrationTest(unittest.TestCase):
         if self.expect_redisearch:
             self.assertEqual(db._search_with_redisearch("name", "beta"), [])
         self.assertEqual(db.search_by_value("name", "beta"), [])
+
+
+class WaitForServiceTests(unittest.TestCase):
+    @patch("test_integration.redis.RedisCluster")
+    def test_cluster_wait_for_service_uses_auth_and_tls(self, redis_cluster):
+        client = Mock()
+        client.ping.return_value = True
+        redis_cluster.return_value = client
+
+        class Probe(RealRedisIntegrationTest):
+            MODE = "cluster"
+
+        Probe.host = "cluster.example.com"
+        Probe.port = 6380
+        Probe.password = "secret"
+        Probe.username = "default"
+        Probe.use_ssl = True
+        Probe.ca_cert = "/tmp/ca.crt"
+
+        Probe.wait_for_service()
+
+        kwargs = redis_cluster.call_args.kwargs
+        self.assertEqual(kwargs["startup_nodes"][0].host, "cluster.example.com")
+        self.assertEqual(kwargs["startup_nodes"][0].port, 6380)
+        self.assertEqual(kwargs["password"], "secret")
+        self.assertEqual(kwargs["username"], "default")
+        self.assertTrue(kwargs["ssl"])
+        self.assertEqual(kwargs["ssl_ca_certs"], "/tmp/ca.crt")
+        self.assertTrue(kwargs["ssl_check_hostname"])
 
 
 class SingleRedisIntegrationTests(RealRedisIntegrationTest):
