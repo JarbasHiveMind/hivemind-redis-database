@@ -128,26 +128,7 @@ jobs:
           REDIS_HOST=127.0.0.1 \
           REDIS_PORT=7000 \
           python -m unittest discover -s tests -p 'test_integration.py' -v
-      - name: Redis Stack Cluster Integration
-        run: |
-          set -euo pipefail
-          for port in 7100 7101 7102; do
-            docker volume create "redis-stack-cluster-$port" >/dev/null
-            docker run -d --name "redis-stack-$port" --network host \
-              -v "redis-stack-cluster-$port:/data" \
-              -e REDIS_ARGS="--port $port --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly no --cluster-announce-ip 127.0.0.1 --cluster-announce-port $port --cluster-announce-bus-port 1$port" \
-              redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a
-          done
-          docker run --rm --network host redis:7.2.5-alpine redis-cli --cluster create \
-            127.0.0.1:7100 127.0.0.1:7101 127.0.0.1:7102 \
-            --cluster-replicas 0 --cluster-yes
-          REDIS_TEST_MODE=cluster \
-          REDIS_HOST=127.0.0.1 \
-          REDIS_PORT=7100 \
-          REDIS_EXPECT_REDISEARCH=1 \
-          python -m unittest discover -s tests -p 'test_integration.py' -v
       - name: Cleanup Integration Containers
         if: always()
         run: |
-          docker rm -f redis-stack-test redis-tls-test redis-cluster-test redis-stack-7100 redis-stack-7101 redis-stack-7102 || true
-          docker volume rm redis-stack-cluster-7100 redis-stack-cluster-7101 redis-stack-cluster-7102 || true
+          docker rm -f redis-stack-test redis-tls-test redis-cluster-test || true

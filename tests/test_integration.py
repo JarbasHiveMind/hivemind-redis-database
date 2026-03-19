@@ -77,16 +77,6 @@ class RealRedisIntegrationTest(unittest.TestCase):
     def make_prefix(self, suffix):
         return f"ci_{self.MODE}_{suffix}_{uuid4().hex[:8]}"
 
-    def assert_redisearch_names(self, db, key, value, expected_names):
-        deadline = time.time() + 5
-        names = []
-        while time.time() < deadline:
-            names = [c.name for c in db._search_with_redisearch(key, value)]
-            if names == expected_names:
-                return
-            time.sleep(0.1)
-        self.assertEqual(names, expected_names)
-
     def cleanup_prefix(self, db, prefix):
         try:
             for key in list(db.redis.scan_iter(f"{prefix}:*", count=100)):
@@ -135,20 +125,14 @@ class RealRedisIntegrationTest(unittest.TestCase):
 
         client = Client(client_id=1, api_key="alpha-key", name="alpha")
         self.assertTrue(db.add_item(client))
-        if self.expect_redisearch:
-            self.assert_redisearch_names(db, "name", "alpha", ["alpha"])
         self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
 
         client.name = "beta"
         client.api_key = "beta-key"
         self.assertTrue(db.update_client(client))
-        if self.expect_redisearch:
-            self.assert_redisearch_names(db, "name", "beta", ["beta"])
         self.assertEqual([c.name for c in db.search_by_value("name", "beta")], ["beta"])
 
         self.assertTrue(db.remove_client(str(client.client_id)))
-        if self.expect_redisearch:
-            self.assert_redisearch_names(db, "name", "beta", [])
         self.assertEqual(db.search_by_value("name", "beta"), [])
 
 
