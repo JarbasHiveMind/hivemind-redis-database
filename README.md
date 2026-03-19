@@ -51,9 +51,10 @@ Compatibility:
 
 Recommendation:
 
+- single Redis deployments: straightforward upgrade, no migration needed
 - new Redis Cluster deployments: enable `cluster_hash_tag` from day one
-- existing Redis Cluster deployments: migrate first, then enable `cluster_hash_tag`
-- single-node Redis deployments: no migration concerns, just use the normal config
+- existing Redis Cluster deployments: upgrade safely on the legacy namespace if
+  needed, then migrate to `cluster_hash_tag` in a maintenance window
 
 ## HiveMind-core Configuration
 
