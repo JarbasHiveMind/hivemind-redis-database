@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.3a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a2) (2026-04-14)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3a1...0.0.3a2)
+
+**Implemented enhancements:**
+
+- Refactoring [\#7](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/7) ([goldyfruit](https://github.com/goldyfruit))
+
+**Merged pull requests:**
+
+- ci: modernize workflows to OpenVoiceOS standards [\#14](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/14) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.0.3a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a1) (2025-12-18)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.2...0.0.3a1)
