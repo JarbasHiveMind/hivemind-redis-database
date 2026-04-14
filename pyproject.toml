@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hivemind-redis-database"
-description = "redis database plugin for hivemind-core"
+description = "Redis database plugin for HiveMind core with RediSearch support"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -22,8 +22,10 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "py-redis",
-    "hivemind-plugin-manager>=0.1.0,<1.0.0",
+    "redis>=4.2.0",
+    "hiredis>=2.0.0",
+    "hivemind-plugin-manager>=0.3.0,<1.0.0",
+    "hivemind-bus-client>=0.4.4",
 ]
 dynamic = ["version"]
 
@@ -35,13 +37,16 @@ Issues = "https://github.com/JarbasHiveMind/hivemind-redis-database/issues"
 [project.entry-points."hivemind.database"]
 hivemind-redis-db-plugin = "hivemind_redis_database:RedisDB"
 
+[project.scripts]
+hivemind-redis-migrate-cluster = "hivemind_redis_database.migration:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",
 ]
 
-[tool.setuptools]
-packages = ["hivemind_redis_database"]
+[tool.setuptools.packages.find]
+exclude = ["tests", "tests.*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hivemind_redis_database.version.__version__" }
