@@ -1,4 +1,0 @@
-redis>=4.2.0
-hiredis>=2.0.0
-hivemind-plugin-manager>=0.3.0,<1.0.0
-hivemind-bus-client>=0.4.4
