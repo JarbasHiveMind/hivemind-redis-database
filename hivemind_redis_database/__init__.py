@@ -618,7 +618,7 @@ class RedisDB(AbstractRemoteDB):
         Args:
             client: The client object to initialize attributes for
         """
-        for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
+        for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist', 'pipeline_blacklist']:
             if not hasattr(client, attr) or getattr(client, attr) is None:
                 setattr(client, attr, [])
 
