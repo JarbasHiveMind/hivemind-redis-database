@@ -547,5 +547,73 @@ class RedisDBTests(unittest.TestCase):
         self.assertNotIn("client:idx:999", redis_client.hashes)
 
 
+class PipelineBlacklistTests(unittest.TestCase):
+    """Coverage for the pipeline_blacklist field handling."""
+
+    def build_db(self, redis_client):
+        db = object.__new__(RedisDB)
+        db.redis = redis_client
+        db.redis_pool = redis_client.connection_pool
+        db.index_prefix = "client"
+        db.redisearch_available = False
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        return db
+
+    def test_ensure_attributes_initializes_pipeline_blacklist(self):
+        db = self.build_db(FakeRedis())
+        # Strip the attribute to simulate a legacy in-memory object.
+        client = Client(client_id=1, api_key="k")
+        del client.__dict__["pipeline_blacklist"]
+        self.assertFalse(hasattr(client, "pipeline_blacklist"))
+
+        db._ensure_client_attributes(client)
+        self.assertEqual(client.pipeline_blacklist, [])
+
+    def test_ensure_attributes_resets_none_to_empty_list(self):
+        db = self.build_db(FakeRedis())
+        client = Client(client_id=1, api_key="k")
+        client.pipeline_blacklist = None
+        db._ensure_client_attributes(client)
+        self.assertEqual(client.pipeline_blacklist, [])
+
+    def test_ensure_attributes_preserves_existing_values(self):
+        db = self.build_db(FakeRedis())
+        client = Client(
+            client_id=1, api_key="k",
+            pipeline_blacklist=["ovos-fallback-pipeline-plugin-low"],
+        )
+        db._ensure_client_attributes(client)
+        self.assertEqual(
+            client.pipeline_blacklist, ["ovos-fallback-pipeline-plugin-low"]
+        )
+
+    def test_add_item_roundtrips_pipeline_blacklist(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+
+        client = Client(
+            client_id=1, api_key="k", name="n",
+            pipeline_blacklist=["a", "b"],
+        )
+        self.assertTrue(db.add_item(client))
+
+        stored = Client.deserialize(redis_client.get("client:client:1"))
+        self.assertEqual(stored.pipeline_blacklist, ["a", "b"])
+
+    def test_legacy_serialized_client_loads_with_empty_default(self):
+        """Old payloads predating the field must load cleanly (field defaults to [])."""
+        redis_client = FakeRedis()
+        legacy_payload = (
+            '{"client_id": 1, "api_key": "k", "name": "legacy",'
+            ' "intent_blacklist": [], "skill_blacklist": [],'
+            ' "message_blacklist": [], "allowed_types": ["recognizer_loop:utterance"]}'
+        )
+        redis_client.storage["client:client:1"] = legacy_payload
+
+        loaded = Client.deserialize(redis_client.get("client:client:1"))
+        self.assertEqual(loaded.pipeline_blacklist, [])
+
+
 if __name__ == "__main__":
     unittest.main()
