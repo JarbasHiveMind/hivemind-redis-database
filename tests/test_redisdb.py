@@ -1,6 +1,5 @@
 import unittest
 import json
-from dataclasses import fields
 from fnmatch import fnmatch
 from unittest.mock import Mock, patch
 
@@ -10,10 +9,6 @@ from redis.cluster import ClusterNode, key_slot
 from hivemind_plugin_manager import DatabaseFactory
 from hivemind_plugin_manager.database import Client
 from hivemind_redis_database import RedisDB
-
-
-CLIENT_SUPPORTS_METADATA = any(field.name == "metadata" for field in fields(Client))
-METADATA_SUPPORT_REQUIRED = "Client.metadata requires hivemind-plugin-manager metadata support"
 
 
 def make_client(*, metadata=None, **kwargs):
@@ -405,8 +400,6 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
 
     def test_client_metadata_survives_add_and_search(self):
-        if not CLIENT_SUPPORTS_METADATA:
-            self.skipTest(METADATA_SUPPORT_REQUIRED)
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
 
@@ -424,8 +417,6 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(found[0].metadata, {"owner_id": "owner-123"})
 
     def test_client_metadata_survives_sync(self):
-        if not CLIENT_SUPPORTS_METADATA:
-            self.skipTest(METADATA_SUPPORT_REQUIRED)
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
         redis_client.storage["client:client:1"] = make_client(
@@ -442,8 +433,6 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(found[0].metadata, {"owner_id": "owner-123"})
 
     def test_client_metadata_defaults_to_empty_dict_for_legacy_record(self):
-        if not CLIENT_SUPPORTS_METADATA:
-            self.skipTest(METADATA_SUPPORT_REQUIRED)
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
         legacy_record = json.loads(Client(client_id=1, api_key="alpha-key", name="alpha").serialize())
@@ -457,8 +446,6 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(found[0].metadata, {})
 
     def test_client_metadata_survives_revoke(self):
-        if not CLIENT_SUPPORTS_METADATA:
-            self.skipTest(METADATA_SUPPORT_REQUIRED)
         redis_client = FakeRedis()
         db = self.build_db(redis_client)
         client = make_client(
