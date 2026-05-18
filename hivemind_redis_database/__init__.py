@@ -575,6 +575,8 @@ class RedisDB(AbstractRemoteDB):
             data = json.loads(client_data)
             old_name = data.get('name', '')
             old_api_key = data.get('api_key', '')
+            if not isinstance(data.get("metadata"), dict):
+                data["metadata"] = {}
 
             # Revoke credentials
             data['name'] = ""
@@ -612,15 +614,33 @@ class RedisDB(AbstractRemoteDB):
             return False
 
     def _ensure_client_attributes(self, client: Client):
+        """Replace explicit-None list fields with []. Needed for legacy records
+        where a list column was stored as ``null``: ``Client(intent_blacklist=None)``
+        keeps None (``default_factory`` only fires when the kwarg is omitted).
+        ``metadata`` is handled by ``Client.__post_init__`` (>=0.5.0).
         """
-        Ensure client has required attributes initialized.
-
-        Args:
-            client: The client object to initialize attributes for
-        """
-        for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
-            if not hasattr(client, attr) or getattr(client, attr) is None:
+        for attr in ('message_blacklist', 'intent_blacklist', 'skill_blacklist'):
+            if getattr(client, attr, None) is None:
                 setattr(client, attr, [])
+
+    @staticmethod
+    def _deserialize_client(client_data) -> Client:
+        """Pre-clean a stored record before handing it to ``cast2client``.
+
+        ``Client.deserialize`` raises ``TypeError`` if ``metadata`` is present
+        but not a dict (intentional in plugin-manager >=0.5.0). Records written
+        before metadata existed have no ``metadata`` key — they're handled by
+        Client's default factory. Records hand-edited or written by buggy
+        callers may carry a non-dict ``metadata`` value; coerce those to ``{}``
+        here so a single bad row doesn't break iteration over the DB.
+        """
+        if isinstance(client_data, str):
+            client_data = json.loads(client_data)
+        if isinstance(client_data, dict) and "metadata" in client_data \
+                and not isinstance(client_data["metadata"], dict):
+            client_data = dict(client_data)
+            client_data["metadata"] = {}
+        return cast2client(client_data)
 
     def update_client(self, client: Client) -> bool:
         """
@@ -639,7 +659,7 @@ class RedisDB(AbstractRemoteDB):
                 LOG.warning(f"Client '{client.client_id}' not found for update")
                 return False
 
-            old_client = cast2client(old_client_data)
+            old_client = self._deserialize_client(old_client_data)
             self._ensure_client_attributes(client)
 
             if self._legacy_cluster_mode():
@@ -782,7 +802,7 @@ class RedisDB(AbstractRemoteDB):
                     self.redis.delete(item_key)
                     continue
                 try:
-                    client = cast2client(client_data)
+                    client = self._deserialize_client(client_data)
                     self._ensure_client_attributes(client)
                     client_records.append(client)
                     max_client_id = max(max_client_id, int(client.client_id))
@@ -864,7 +884,7 @@ class RedisDB(AbstractRemoteDB):
             if not client_data or client_data == CREATE_MARKER:
                 continue
             try:
-                client = cast2client(client_data)
+                client = self._deserialize_client(client_data)
                 if not include_revoked and client.api_key == "revoked":
                     continue
                 self._ensure_client_attributes(client)
