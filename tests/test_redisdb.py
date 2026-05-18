@@ -462,6 +462,49 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(stored.api_key, "revoked")
         self.assertEqual(stored.metadata, {"owner_id": "owner-123"})
 
+    def test_client_metadata_updated_via_update_client(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        db.add_item(make_client(client_id=1, api_key="k", name="alpha",
+                                metadata={"owner": "old"}))
+
+        replacement = make_client(client_id=1, api_key="k", name="alpha",
+                                  metadata={"owner": "new", "extra": "x"})
+        self.assertTrue(db.update_client(replacement))
+
+        found = db.search_by_value("api_key", "k")
+        self.assertEqual(found[0].metadata, {"owner": "new", "extra": "x"})
+
+    def test_client_metadata_nested_and_non_ascii_round_trip(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        meta = {
+            "owner": {"id": "owner-1", "tags": ["a", "b"]},
+            "name": "Zé Ninguém",
+            "emoji": "🚀",
+        }
+        db.add_item(make_client(client_id=1, api_key="k", name="alpha", metadata=meta))
+        found = db.search_by_value("api_key", "k")
+        self.assertEqual(found[0].metadata, meta)
+
+    def test_deserialize_client_coerces_non_dict_metadata_to_empty(self):
+        # Records hand-written into redis with a bad metadata value must not crash.
+        from hivemind_redis_database import RedisDB
+        record = json.loads(Client(client_id=1, api_key="k", name="alpha").serialize())
+        record["metadata"] = "not a dict"
+        client = RedisDB._deserialize_client(json.dumps(record))
+        self.assertEqual(client.metadata, {})
+
+    def test_iteration_yields_clients_with_metadata(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        db.add_item(make_client(client_id=1, api_key="k1", name="a",
+                                metadata={"tier": "gold"}))
+        db.add_item(make_client(client_id=2, api_key="k2", name="b",
+                                metadata={"tier": "silver"}))
+        tiers = sorted(c.metadata["tier"] for c in db)
+        self.assertEqual(tiers, ["gold", "silver"])
+
     def test_legacy_cluster_mode_update_and_revoke_do_not_depend_on_indexes(self):
         redis_client = FakeRedis()
         db = self.build_db(redis_client, is_cluster=True, cluster_hash_tag=None)
