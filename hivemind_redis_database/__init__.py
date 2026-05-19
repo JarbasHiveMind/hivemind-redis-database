@@ -490,8 +490,21 @@ class RedisDB(AbstractRemoteDB):
         if stored < target:
             LOG.info("RedisDB: migrating namespace '%s' schema v%d -> v%d",
                      self._base_prefix(), stored, target)
-            self.migrate(from_version=stored)
-            self.redis.set(self._schema_version_key(), int(target))
+            # Bundle the per-record rewrites and the schema sentinel SET
+            # into one MULTI/EXEC so they land atomically — a crash can
+            # never leave the namespace in a "rows migrated but stale
+            # sentinel" (or vice versa) state.
+            try:
+                pipe = self.redis.pipeline(transaction=True)
+            except Exception:
+                pipe = None
+            if pipe is None:
+                self.migrate(from_version=stored)
+                self.redis.set(self._schema_version_key(), int(target))
+            else:
+                self._migrate_into_pipeline(pipe, from_version=stored)
+                pipe.set(self._schema_version_key(), int(target))
+                pipe.execute()
 
     def migrate(self, from_version: int) -> None:
         """Migrate stored client records to the current ``SCHEMA_VERSION``.
@@ -509,6 +522,15 @@ class RedisDB(AbstractRemoteDB):
         ``metadata["message_blacklist"]`` from a prior migration run
         is also stripped.
         """
+        self._migrate_into_pipeline(self.redis, from_version=from_version)
+
+    def _migrate_into_pipeline(self, writer, from_version: int) -> None:
+        """Internal migration loop that issues writes through ``writer``
+        (either ``self.redis`` for a non-transactional pass or a
+        ``Redis.pipeline(transaction=True)`` so the rewrites and the
+        schema sentinel land atomically). ``writer`` must expose a
+        ``.set(key, value)`` method — both ``Redis`` and ``Pipeline``
+        do."""
         if from_version >= 2:
             return
         legacy_keys = ("intent_blacklist", "skill_blacklist")
@@ -542,7 +564,7 @@ class RedisDB(AbstractRemoteDB):
             if changed:
                 record["metadata"] = metadata
                 try:
-                    self.redis.set(key, json.dumps(record))
+                    writer.set(key, json.dumps(record))
                 except Exception as e:
                     LOG.error("RedisDB migrate v2: failed to rewrite %s: %s",
                               key, e)
