@@ -7,11 +7,24 @@ import redis
 from redis.cluster import ClusterNode
 from ovos_utils.log import LOG
 
-from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2client
+from hivemind_plugin_manager.database import (Client, AbstractDB,
+                                                AbstractRemoteDB, cast2client)
 
 
 CREATE_MARKER = "__hivemind_creating__"
 CREATE_MARKER_TTL = 30
+
+
+def _iter_client_records_safely(db) -> "Iterable[tuple[str, str]]":
+    """Yield (key, raw_value) pairs for every stored client record in the
+    active namespace. Used by ``migrate()`` to rewrite records in place.
+    Skips empties; callers must handle ``CREATE_MARKER`` themselves.
+    """
+    for key in db.redis.scan_iter(db._scan_pattern("client"), count=100):
+        raw = db.redis.get(key)
+        if not raw:
+            continue
+        yield key, raw
 
 
 @dataclass
@@ -115,6 +128,8 @@ class RedisDB(AbstractRemoteDB):
             LOG.error("Redis connection health check failed during initialization")
             raise redis.ConnectionError("Failed to establish healthy Redis connection")
 
+        self._maybe_migrate()
+
     def _normalize_parameters(self):
         """Normalize optional parameters and backward-compatible aliases."""
         if self.host is None:
@@ -194,6 +209,9 @@ class RedisDB(AbstractRemoteDB):
 
     def _counter_key(self) -> str:
         return self._key("count")
+
+    def _schema_version_key(self) -> str:
+        return self._key("schema_version")
 
     def _id_sequence_key(self) -> str:
         return self._key("id_seq")
@@ -454,6 +472,81 @@ class RedisDB(AbstractRemoteDB):
         except TypeError:
             return bool(self.redis.setnx(item_key, CREATE_MARKER))
 
+    def _maybe_migrate(self) -> None:
+        """Run schema migration if the stored namespace version is behind
+        ``SCHEMA_VERSION``.
+
+        The version is stored at a per-namespace key ``{prefix}:schema_version``
+        so multi-hub deployments using ``index_prefix``/``cluster_hash_tag``
+        each track their own migration state. Tolerates older HPM that
+        predates ``SCHEMA_VERSION`` by falling back to ``1``.
+        """
+        target = getattr(AbstractDB, "SCHEMA_VERSION", 1)
+        try:
+            raw = self.redis.get(self._schema_version_key())
+            stored = int(raw) if raw is not None else 1
+        except (ValueError, TypeError):
+            stored = 1
+        if stored < target:
+            LOG.info("RedisDB: migrating namespace '%s' schema v%d -> v%d",
+                     self._base_prefix(), stored, target)
+            self.migrate(from_version=stored)
+            self.redis.set(self._schema_version_key(), int(target))
+
+    def migrate(self, from_version: int) -> None:
+        """Migrate stored client records to the current ``SCHEMA_VERSION``.
+
+        Idempotent and crash-safe: a partial migration re-run produces
+        the same final state. A row that has already been migrated has
+        no top-level legacy keys, so the per-row update is a no-op.
+
+        v1 -> v2: fold each record's top-level ``intent_blacklist`` /
+        ``skill_blacklist`` JSON values into the record's ``metadata``
+        dict (``setdefault`` — explicit metadata values are never
+        clobbered), then remove the legacy top-level keys.
+        ``message_blacklist`` is purged outright (the field is not
+        part of the ``Client`` data model); any residual
+        ``metadata["message_blacklist"]`` from a prior migration run
+        is also stripped.
+        """
+        if from_version >= 2:
+            return
+        legacy_keys = ("intent_blacklist", "skill_blacklist")
+        for key, raw in _iter_client_records_safely(self):
+            if raw == CREATE_MARKER:
+                continue
+            try:
+                record = json.loads(raw)
+            except (TypeError, ValueError) as e:
+                LOG.warning("RedisDB migrate v2: skipping unparseable record "
+                            "at %s: %s", key, e)
+                continue
+            if not isinstance(record, dict):
+                continue
+            metadata = record.get("metadata") if isinstance(
+                record.get("metadata"), dict) else {}
+            changed = False
+            # Strip message_blacklist outright (top-level + metadata).
+            if "message_blacklist" in record:
+                record.pop("message_blacklist", None)
+                changed = True
+            if metadata.pop("message_blacklist", None) is not None:
+                changed = True
+            for lk in legacy_keys:
+                if lk in record:
+                    val = record.pop(lk)
+                    changed = True
+                    if val and lk not in metadata:
+                        metadata[lk] = list(val) if isinstance(
+                            val, (list, tuple)) else val
+            if changed:
+                record["metadata"] = metadata
+                try:
+                    self.redis.set(key, json.dumps(record))
+                except Exception as e:
+                    LOG.error("RedisDB migrate v2: failed to rewrite %s: %s",
+                              key, e)
+
     def add_item(self, client: Client) -> bool:
         """
         Add a new client to the Redis database or update existing client.
@@ -619,7 +712,8 @@ class RedisDB(AbstractRemoteDB):
         keeps None (``default_factory`` only fires when the kwarg is omitted).
         ``metadata`` is handled by ``Client.__post_init__`` (>=0.5.0).
         """
-        for attr in ('message_blacklist', 'intent_blacklist', 'skill_blacklist'):
+        # message_blacklist is no longer part of the Client data model.
+        for attr in ('intent_blacklist', 'skill_blacklist'):
             if getattr(client, attr, None) is None:
                 setattr(client, attr, [])
 
