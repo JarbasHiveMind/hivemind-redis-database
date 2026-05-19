@@ -504,11 +504,10 @@ class RedisDB(AbstractRemoteDB):
         ``skill_blacklist`` JSON values into the record's ``metadata``
         dict (``setdefault`` — explicit metadata values are never
         clobbered), then remove the legacy top-level keys.
-        ``message_blacklist`` is **purged without carry-forward** — the
-        field was a 2024-12-20 design mistake that contradicted the
-        deny-by-default whitelist model and was removed from the Client
-        data model in HPM. Any residual ``metadata["message_blacklist"]``
-        from a prior migration run is also stripped.
+        ``message_blacklist`` is purged outright (the field is not
+        part of the ``Client`` data model); any residual
+        ``metadata["message_blacklist"]`` from a prior migration run
+        is also stripped.
         """
         if from_version >= 2:
             return
