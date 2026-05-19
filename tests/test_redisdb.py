@@ -661,5 +661,89 @@ class RedisDBTests(unittest.TestCase):
         self.assertNotIn("client:idx:999", redis_client.hashes)
 
 
+class TestRedisDBForwardCompat(unittest.TestCase):
+    """A namespace whose persisted schema_version exceeds the backend
+    SCHEMA_VERSION must raise RuntimeError on open."""
+
+    def test_forward_version_raises(self):
+        fake = FakeRedis()
+        fake.storage["client:schema_version"] = "999"
+
+        with patch.object(RedisDB, "_detect_cluster", return_value=False), \
+                patch.object(RedisDB, "_create_single_connection", return_value=fake), \
+                patch.object(RedisDB, "_check_redisearch_availability", return_value=False), \
+                patch.object(RedisDB, "health_check", return_value=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                RedisDB()
+        self.assertIn("999", str(ctx.exception))
+
+
+class TestRedisDBRefresh(unittest.TestCase):
+    """``refresh`` must be a targeted single-key GET — no scan_iter."""
+
+    def test_refresh_returns_record(self):
+        fake = FakeRedis()
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.redis_pool = fake.connection_pool
+        db.index_prefix = "client"
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        db.redisearch_available = False
+        fake.storage["client:client:7"] = Client(
+            client_id=7, api_key="k", name="bob",
+        ).serialize()
+
+        got = db.refresh(7)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.client_id, 7)
+        # missing id returns None
+        self.assertIsNone(db.refresh(999))
+
+    def test_refresh_skips_create_marker(self):
+        fake = FakeRedis()
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.redis_pool = fake.connection_pool
+        db.index_prefix = "client"
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        db.redisearch_available = False
+        fake.storage["client:client:5"] = "__hivemind_creating__"
+        self.assertIsNone(db.refresh(5))
+
+
+class TestRedisDBPipelineTransactional(unittest.TestCase):
+    """Single-node Redis must use transactional pipelines so add_item /
+    update_client multi-key writes land atomically (MULTI/EXEC)."""
+
+    def test_single_node_pipeline_is_transactional(self):
+        fake = FakeRedis()
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        db._pipeline()
+        self.assertTrue(fake.pipeline_transaction_flags[-1])
+
+    def test_legacy_cluster_pipeline_not_transactional(self):
+        fake = FakeRedis()
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.is_cluster = True
+        db.cluster_hash_tag = None
+        db._pipeline()
+        self.assertFalse(fake.pipeline_transaction_flags[-1])
+
+    def test_cluster_hash_tag_pipeline_is_transactional(self):
+        fake = FakeRedis()
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.is_cluster = True
+        db.cluster_hash_tag = "clients"
+        db._pipeline()
+        self.assertTrue(fake.pipeline_transaction_flags[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

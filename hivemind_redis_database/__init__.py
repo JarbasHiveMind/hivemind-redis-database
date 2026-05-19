@@ -225,9 +225,19 @@ class RedisDB(AbstractRemoteDB):
         return f"{self._key(*parts)}:*"
 
     def _pipeline(self):
-        if getattr(self, "is_cluster", False) and self.cluster_hash_tag:
-            return self.redis.pipeline(transaction=True)
-        return self.redis.pipeline()
+        """Return a pipeline appropriate for the current Redis topology.
+
+        Single-node Redis: transactional (MULTI/EXEC) so ``add_item`` /
+        ``update_client`` multi-key writes land atomically. Cluster with
+        a hash-tag namespace: transactional within the single slot.
+        Legacy cluster mode (no hash tag) cannot do multi-key MULTI/EXEC
+        across slots, so the pipeline is non-transactional there.
+        """
+        if getattr(self, "is_cluster", False):
+            if self.cluster_hash_tag:
+                return self.redis.pipeline(transaction=True)
+            return self.redis.pipeline()
+        return self.redis.pipeline(transaction=True)
 
     def _legacy_cluster_mode(self) -> bool:
         """Return True when running on Redis Cluster without a hash-tag namespace."""
@@ -487,6 +497,7 @@ class RedisDB(AbstractRemoteDB):
             stored = int(raw) if raw is not None else 1
         except (ValueError, TypeError):
             stored = 1
+        self._check_forward_compat(stored)
         if stored < target:
             LOG.info("RedisDB: migrating namespace '%s' schema v%d -> v%d",
                      self._base_prefix(), stored, target)
@@ -805,6 +816,37 @@ class RedisDB(AbstractRemoteDB):
         except Exception as e:
             LOG.error(f"Failed to update client '{client.client_id}': {e}")
             return False
+
+    def get_client_by_id(self, client_id: int) -> Optional[Client]:
+        """Fetch a single client by primary key with one ``GET``.
+
+        Targeted lookup used by :meth:`refresh` on the admission hot
+        path — avoids any ``scan_iter`` / index walk. Returns ``None``
+        if the key is missing, holds a stale create marker, or fails
+        to deserialize.
+        """
+        if client_id is None:
+            return None
+        try:
+            raw = self.redis.get(self._client_key(client_id))
+        except Exception as e:
+            LOG.error(f"Failed to fetch client {client_id} from Redis: {e}")
+            return None
+        if not raw or raw == CREATE_MARKER:
+            return None
+        try:
+            return self._deserialize_client(raw)
+        except Exception as e:
+            LOG.warning(f"Failed to deserialize client {client_id}: {e}")
+            return None
+
+    def refresh(self, client_id: int) -> Optional[Client]:
+        """Targeted single-key fetch — no global ``sync()``.
+
+        Overrides the base default so the admission chain never triggers
+        a full keyspace scan + index rebuild per inbound message.
+        """
+        return self.get_client_by_id(client_id)
 
     def _search_with_redisearch(self, key: str, val: str) -> List[Client]:
         """
