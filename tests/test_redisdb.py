@@ -661,5 +661,117 @@ class RedisDBTests(unittest.TestCase):
         self.assertNotIn("client:idx:999", redis_client.hashes)
 
 
+class RedisDBMigrationTests(unittest.TestCase):
+    """v1 -> v2: legacy top-level OVOS blacklist keys folded into metadata."""
+
+    def _build_db(self, redis_client):
+        db = object.__new__(RedisDB)
+        db.redis = redis_client
+        db.redis_pool = redis_client.connection_pool
+        db.index_prefix = "client"
+        db.redisearch_available = False
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        return db
+
+    def _seed_v1_record(self, redis_client, *, with_explicit_metadata=False):
+        record = {
+            "client_id": 7,
+            "api_key": "k",
+            "name": "alpha",
+            "intent_blacklist": ["i:1"],
+            "skill_blacklist": ["s:1"],
+            "message_blacklist": ["m:1"],
+            "allowed_types": [],
+            "metadata": {"owner": "u"},
+        }
+        if with_explicit_metadata:
+            record["metadata"]["skill_blacklist"] = ["explicit"]
+        redis_client.storage["client:client:7"] = json.dumps(record)
+        return record
+
+    def test_migrate_folds_legacy_keys_into_metadata(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        self._seed_v1_record(redis_client)
+
+        db.migrate(from_version=1)
+
+        stored = json.loads(redis_client.storage["client:client:7"])
+        self.assertNotIn("intent_blacklist", stored)
+        self.assertNotIn("skill_blacklist", stored)
+        self.assertNotIn("message_blacklist", stored)
+        self.assertEqual(stored["metadata"]["owner"], "u")
+        self.assertEqual(stored["metadata"]["intent_blacklist"], ["i:1"])
+        self.assertEqual(stored["metadata"]["skill_blacklist"], ["s:1"])
+        self.assertEqual(stored["metadata"]["message_blacklist"], ["m:1"])
+
+    def test_migrate_setdefault_does_not_clobber_explicit_metadata(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        self._seed_v1_record(redis_client, with_explicit_metadata=True)
+
+        db.migrate(from_version=1)
+
+        stored = json.loads(redis_client.storage["client:client:7"])
+        self.assertEqual(stored["metadata"]["skill_blacklist"], ["explicit"])
+
+    def test_migrate_is_idempotent(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        self._seed_v1_record(redis_client)
+
+        db.migrate(from_version=1)
+        first = redis_client.storage["client:client:7"]
+        db.migrate(from_version=1)  # re-run: legacy keys already gone
+        self.assertEqual(redis_client.storage["client:client:7"], first)
+
+    def test_migrate_skips_when_already_at_target(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        self._seed_v1_record(redis_client)
+
+        db.migrate(from_version=2)
+
+        stored = json.loads(redis_client.storage["client:client:7"])
+        self.assertIn("intent_blacklist", stored)
+
+    def test_migrate_skips_create_marker_and_garbage(self):
+        from hivemind_redis_database import CREATE_MARKER
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        redis_client.storage["client:client:1"] = CREATE_MARKER
+        redis_client.storage["client:client:2"] = "not-json{"
+
+        db.migrate(from_version=1)
+
+        self.assertEqual(redis_client.storage["client:client:1"], CREATE_MARKER)
+        self.assertEqual(redis_client.storage["client:client:2"], "not-json{")
+
+    def test_maybe_migrate_writes_schema_version(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        self._seed_v1_record(redis_client)
+
+        db._maybe_migrate()
+
+        self.assertEqual(int(redis_client.storage["client:schema_version"]), 2)
+        # second invocation is a no-op
+        db._maybe_migrate()
+        self.assertEqual(int(redis_client.storage["client:schema_version"]), 2)
+
+    def test_maybe_migrate_noop_when_version_current(self):
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        redis_client.storage["client:schema_version"] = "2"
+        self._seed_v1_record(redis_client)  # would be migrated if hook ran
+
+        db._maybe_migrate()
+
+        # Record untouched because version is already current.
+        stored = json.loads(redis_client.storage["client:client:7"])
+        self.assertIn("intent_blacklist", stored)
+
+
 if __name__ == "__main__":
     unittest.main()
