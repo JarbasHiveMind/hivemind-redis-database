@@ -501,15 +501,18 @@ class RedisDB(AbstractRemoteDB):
         no top-level legacy keys, so the per-row update is a no-op.
 
         v1 -> v2: fold each record's top-level ``intent_blacklist`` /
-        ``skill_blacklist`` / ``message_blacklist`` JSON values into
-        the record's ``metadata`` dict (``setdefault`` — explicit
-        metadata values are never clobbered), then remove the legacy
-        top-level keys.
+        ``skill_blacklist`` JSON values into the record's ``metadata``
+        dict (``setdefault`` — explicit metadata values are never
+        clobbered), then remove the legacy top-level keys.
+        ``message_blacklist`` is **purged without carry-forward** — the
+        field was a 2024-12-20 design mistake that contradicted the
+        deny-by-default whitelist model and was removed from the Client
+        data model in HPM. Any residual ``metadata["message_blacklist"]``
+        from a prior migration run is also stripped.
         """
         if from_version >= 2:
             return
-        legacy_keys = ("intent_blacklist", "skill_blacklist",
-                       "message_blacklist")
+        legacy_keys = ("intent_blacklist", "skill_blacklist")
         for key, raw in _iter_client_records_safely(self):
             if raw == CREATE_MARKER:
                 continue
@@ -524,6 +527,12 @@ class RedisDB(AbstractRemoteDB):
             metadata = record.get("metadata") if isinstance(
                 record.get("metadata"), dict) else {}
             changed = False
+            # Strip message_blacklist outright (top-level + metadata).
+            if "message_blacklist" in record:
+                record.pop("message_blacklist", None)
+                changed = True
+            if metadata.pop("message_blacklist", None) is not None:
+                changed = True
             for lk in legacy_keys:
                 if lk in record:
                     val = record.pop(lk)
@@ -704,7 +713,8 @@ class RedisDB(AbstractRemoteDB):
         keeps None (``default_factory`` only fires when the kwarg is omitted).
         ``metadata`` is handled by ``Client.__post_init__`` (>=0.5.0).
         """
-        for attr in ('message_blacklist', 'intent_blacklist', 'skill_blacklist'):
+        # message_blacklist is no longer part of the Client data model.
+        for attr in ('intent_blacklist', 'skill_blacklist'):
             if getattr(client, attr, None) is None:
                 setattr(client, attr, [])
 

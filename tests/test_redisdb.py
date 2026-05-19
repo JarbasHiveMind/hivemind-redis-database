@@ -704,7 +704,27 @@ class RedisDBMigrationTests(unittest.TestCase):
         self.assertEqual(stored["metadata"]["owner"], "u")
         self.assertEqual(stored["metadata"]["intent_blacklist"], ["i:1"])
         self.assertEqual(stored["metadata"]["skill_blacklist"], ["s:1"])
-        self.assertEqual(stored["metadata"]["message_blacklist"], ["m:1"])
+        # message_blacklist is purged outright, not folded into metadata.
+        self.assertNotIn("message_blacklist", stored["metadata"])
+
+    def test_migrate_purges_residual_metadata_message_blacklist(self):
+        """A row already half-migrated (legacy keys at top level gone,
+        but metadata still carrying message_blacklist from an older
+        plugin version) must have the metadata key stripped."""
+        redis_client = FakeRedis()
+        db = self._build_db(redis_client)
+        record = {
+            "client_id": 7, "api_key": "k", "name": "alpha",
+            "allowed_types": [],
+            "metadata": {"owner": "u", "message_blacklist": ["m:1"]},
+        }
+        redis_client.storage["client:client:7"] = json.dumps(record)
+
+        db.migrate(from_version=1)
+
+        stored = json.loads(redis_client.storage["client:client:7"])
+        self.assertNotIn("message_blacklist", stored["metadata"])
+        self.assertEqual(stored["metadata"]["owner"], "u")
 
     def test_migrate_setdefault_does_not_clobber_explicit_metadata(self):
         redis_client = FakeRedis()
