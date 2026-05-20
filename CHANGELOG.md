@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.4a2) (2026-05-20)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.4a1...0.0.4a2)
+
+**Merged pull requests:**
+
+- ci: pass PYPI\_TOKEN explicitly, drop secrets:inherit elsewhere [\#21](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/21) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.0.4a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.4a1) (2026-05-18)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3...0.0.4a1)
