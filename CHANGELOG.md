@@ -1,24 +1,20 @@
 # Changelog
 
-## [0.0.3a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a2) (2026-04-14)
+## [0.0.4a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.4a2) (2026-05-20)
 
-[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3a1...0.0.3a2)
-
-**Implemented enhancements:**
-
-- Refactoring [\#7](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/7) ([goldyfruit](https://github.com/goldyfruit))
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.4a1...0.0.4a2)
 
 **Merged pull requests:**
 
-- ci: modernize workflows to OpenVoiceOS standards [\#14](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/14) ([JarbasAl](https://github.com/JarbasAl))
+- ci: pass PYPI\_TOKEN explicitly, drop secrets:inherit elsewhere [\#21](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/21) ([JarbasAl](https://github.com/JarbasAl))
 
-## [0.0.3a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a1) (2025-12-18)
+## [0.0.4a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.4a1) (2026-05-18)
 
-[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.2...0.0.3a1)
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3...0.0.4a1)
 
 **Merged pull requests:**
 
-- chore: Configure Renovate [\#8](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/8) ([renovate[bot]](https://github.com/apps/renovate))
+- Preserve client metadata \(supersedes \#17\) [\#18](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/18) ([JarbasAl](https://github.com/JarbasAl))
 
 
 

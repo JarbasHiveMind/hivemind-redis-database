@@ -1,4 +1,5 @@
 import unittest
+import json
 from fnmatch import fnmatch
 from unittest.mock import Mock, patch
 
@@ -8,6 +9,13 @@ from redis.cluster import ClusterNode, key_slot
 from hivemind_plugin_manager import DatabaseFactory
 from hivemind_plugin_manager.database import Client
 from hivemind_redis_database import RedisDB
+
+
+def make_client(*, metadata=None, **kwargs):
+    client = Client(**kwargs)
+    if metadata is not None:
+        client.metadata = metadata
+    return client
 
 
 class FakeRedis:
@@ -390,6 +398,112 @@ class RedisDBTests(unittest.TestCase):
         self.assertNotIn("client:idx:1", redis_client.hashes)
         self.assertEqual(len(db), 1)
         self.assertEqual([c.name for c in db.search_by_value("name", "alpha")], ["alpha"])
+
+    def test_client_metadata_survives_add_and_search(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+
+        client = make_client(
+            client_id=1,
+            api_key="alpha-key",
+            name="alpha",
+            metadata={"owner_id": "owner-123"},
+        )
+        self.assertTrue(db.add_item(client))
+
+        found = db.search_by_value("api_key", "alpha-key")
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].metadata, {"owner_id": "owner-123"})
+
+    def test_client_metadata_survives_sync(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        redis_client.storage["client:client:1"] = make_client(
+            client_id=1,
+            api_key="alpha-key",
+            name="alpha",
+            metadata={"owner_id": "owner-123"},
+        ).serialize()
+
+        db.sync()
+        found = db.search_by_value("api_key", "alpha-key")
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].metadata, {"owner_id": "owner-123"})
+
+    def test_client_metadata_defaults_to_empty_dict_for_legacy_record(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        legacy_record = json.loads(Client(client_id=1, api_key="alpha-key", name="alpha").serialize())
+        legacy_record.pop("metadata", None)
+        redis_client.storage["client:client:1"] = json.dumps(legacy_record)
+
+        self.assertTrue(db.sync())
+        found = db.search_by_value("api_key", "alpha-key")
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].metadata, {})
+
+    def test_client_metadata_survives_revoke(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        client = make_client(
+            client_id=1,
+            api_key="alpha-key",
+            name="alpha",
+            metadata={"owner_id": "owner-123"},
+        )
+        self.assertTrue(db.add_item(client))
+
+        self.assertTrue(db.remove_client("1"))
+
+        stored = Client.deserialize(redis_client.get("client:client:1"))
+        self.assertEqual(stored.api_key, "revoked")
+        self.assertEqual(stored.metadata, {"owner_id": "owner-123"})
+
+    def test_client_metadata_updated_via_update_client(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        db.add_item(make_client(client_id=1, api_key="k", name="alpha",
+                                metadata={"owner": "old"}))
+
+        replacement = make_client(client_id=1, api_key="k", name="alpha",
+                                  metadata={"owner": "new", "extra": "x"})
+        self.assertTrue(db.update_client(replacement))
+
+        found = db.search_by_value("api_key", "k")
+        self.assertEqual(found[0].metadata, {"owner": "new", "extra": "x"})
+
+    def test_client_metadata_nested_and_non_ascii_round_trip(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        meta = {
+            "owner": {"id": "owner-1", "tags": ["a", "b"]},
+            "name": "Zé Ninguém",
+            "emoji": "🚀",
+        }
+        db.add_item(make_client(client_id=1, api_key="k", name="alpha", metadata=meta))
+        found = db.search_by_value("api_key", "k")
+        self.assertEqual(found[0].metadata, meta)
+
+    def test_deserialize_client_coerces_non_dict_metadata_to_empty(self):
+        # Records hand-written into redis with a bad metadata value must not crash.
+        from hivemind_redis_database import RedisDB
+        record = json.loads(Client(client_id=1, api_key="k", name="alpha").serialize())
+        record["metadata"] = "not a dict"
+        client = RedisDB._deserialize_client(json.dumps(record))
+        self.assertEqual(client.metadata, {})
+
+    def test_iteration_yields_clients_with_metadata(self):
+        redis_client = FakeRedis()
+        db = self.build_db(redis_client)
+        db.add_item(make_client(client_id=1, api_key="k1", name="a",
+                                metadata={"tier": "gold"}))
+        db.add_item(make_client(client_id=2, api_key="k2", name="b",
+                                metadata={"tier": "silver"}))
+        tiers = sorted(c.metadata["tier"] for c in db)
+        self.assertEqual(tiers, ["gold", "silver"])
 
     def test_legacy_cluster_mode_update_and_revoke_do_not_depend_on_indexes(self):
         redis_client = FakeRedis()

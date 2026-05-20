@@ -8,10 +8,10 @@ on:
 jobs:
   coverage:
     uses: OpenVoiceOS/gh-automations/.github/workflows/coverage.yml@dev
-    secrets: inherit
     with:
       python_version: '3.11'
       coverage_source: 'hivemind_redis_database'
       test_path: 'tests/'
       install_extras: ''
       min_coverage: 0
+      pr_comment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
