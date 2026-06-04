@@ -745,5 +745,97 @@ class TestRedisDBPipelineTransactional(unittest.TestCase):
         self.assertTrue(fake.pipeline_transaction_flags[-1])
 
 
+class TestRedisDBSchemaV2RoundTrip(unittest.TestCase):
+    """v2 schema: allowed_types + skill/intent blacklists (in metadata) survive
+    add→search and add→refresh cycles without loss or mutation."""
+
+    def _build_db(self, fake):
+        db = object.__new__(RedisDB)
+        db.redis = fake
+        db.redis_pool = fake.connection_pool
+        db.index_prefix = "client"
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        db.redisearch_available = False
+        return db
+
+    def test_allowed_types_survives_round_trip(self):
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        allowed = ["recognizer_loop:utterance", "speak:b64_audio"]
+        c = Client(client_id=1, api_key="k", allowed_types=allowed)
+        db.add_item(c)
+        found = db.search_by_value("api_key", "k")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].allowed_types, allowed)
+
+    def test_skill_blacklist_in_metadata_survives_round_trip(self):
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        meta = {"skill_blacklist": ["my.skill"]}
+        c = Client(client_id=2, api_key="k2", metadata=meta)
+        db.add_item(c)
+        found = db.search_by_value("api_key", "k2")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].skill_blacklist, ["my.skill"])
+        self.assertEqual(found[0].metadata["skill_blacklist"], ["my.skill"])
+
+    def test_intent_blacklist_in_metadata_survives_round_trip(self):
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        meta = {"intent_blacklist": ["my.skill:action"]}
+        c = Client(client_id=3, api_key="k3", metadata=meta)
+        db.add_item(c)
+        found = db.search_by_value("api_key", "k3")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].intent_blacklist, ["my.skill:action"])
+        self.assertEqual(found[0].metadata["intent_blacklist"], ["my.skill:action"])
+
+    def test_message_blacklist_not_present_in_stored_record(self):
+        """message_blacklist must not appear in a freshly-stored record."""
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        c = Client(client_id=4, api_key="k4")
+        db.add_item(c)
+        raw = fake.storage["client:client:4"]
+        stored = json.loads(raw)
+        self.assertNotIn("message_blacklist", stored)
+        self.assertNotIn("message_blacklist", stored.get("metadata", {}))
+
+    def test_v1_row_reads_cleanly_forward_compat(self):
+        """A v1 record (legacy top-level skill_blacklist) must deserialize
+        without crashing — _deserialize_client is the forward-compat guard."""
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        v1_record = {
+            "client_id": 5,
+            "api_key": "k5",
+            "name": "old",
+            "skill_blacklist": ["old.skill"],
+            "intent_blacklist": [],
+            "message_blacklist": ["drop.me"],
+            "allowed_types": ["recognizer_loop:utterance"],
+            "metadata": {},
+        }
+        fake.storage["client:client:5"] = json.dumps(v1_record)
+        client = db.get_client_by_id(5)
+        self.assertIsNotNone(client)
+        self.assertEqual(client.api_key, "k5")
+        self.assertEqual(client.allowed_types, ["recognizer_loop:utterance"])
+
+    def test_refresh_returns_v2_fields(self):
+        fake = FakeRedis()
+        db = self._build_db(fake)
+        allowed = ["recognizer_loop:utterance"]
+        meta = {"skill_blacklist": ["s:1"], "intent_blacklist": ["i:1"]}
+        c = Client(client_id=6, api_key="k6", allowed_types=allowed, metadata=meta)
+        db.add_item(c)
+        got = db.refresh(6)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.allowed_types, allowed)
+        self.assertEqual(got.skill_blacklist, ["s:1"])
+        self.assertEqual(got.intent_blacklist, ["i:1"])
+
+
 if __name__ == "__main__":
     unittest.main()
