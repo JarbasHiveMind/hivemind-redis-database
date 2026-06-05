@@ -43,6 +43,7 @@ hivemind-redis-migrate-cluster = "hivemind_redis_database.migration:main"
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",
+    "fakeredis>=2.0",
 ]
 
 [tool.setuptools.packages.find]
