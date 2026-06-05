@@ -497,7 +497,10 @@ class RedisDB(AbstractRemoteDB):
             stored = int(raw) if raw is not None else 1
         except (ValueError, TypeError):
             stored = 1
-        self._check_forward_compat(stored)
+        # Tolerate older HPM that predates the forward-compat guard, the
+        # same way SCHEMA_VERSION is read defensively above.
+        if hasattr(self, "_check_forward_compat"):
+            self._check_forward_compat(stored)
         if stored < target:
             LOG.info("RedisDB: migrating namespace '%s' schema v%d -> v%d",
                      self._base_prefix(), stored, target)
