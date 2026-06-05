@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a2) (2026-06-05)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a1...0.1.0a2)
+
+**Merged pull requests:**
+
+- docs: zero-to-hero README and /docs coverage [\#25](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/25) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.1.0a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a1) (2026-06-05)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.4a2...0.1.0a1)
