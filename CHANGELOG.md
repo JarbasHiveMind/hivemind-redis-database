@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a1) (2026-06-05)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.4a2...0.1.0a1)
+
+**Merged pull requests:**
+
+- feat\(db\): schema v2 migration — fold legacy blacklist keys into metadata [\#20](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/20) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.0.4a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.4a2) (2026-05-20)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.4a1...0.0.4a2)
