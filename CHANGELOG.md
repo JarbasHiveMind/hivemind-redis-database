@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0a3](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a3) (2026-07-04)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a2...0.1.0a3)
+
+**Merged pull requests:**
+
+- test: hivescope e2e + CI [\#28](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/28) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.1.0a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a2) (2026-06-05)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a1...0.1.0a2)
