@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0a4](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a4) (2026-07-04)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a3...0.1.0a4)
+
+**Merged pull requests:**
+
+- Update actions/checkout action to v7 [\#27](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/27) ([renovate[bot]](https://github.com/apps/renovate))
+
 ## [0.1.0a3](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a3) (2026-07-04)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a2...0.1.0a3)
