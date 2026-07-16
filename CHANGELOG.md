@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a5](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a5) (2026-07-16)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a4...0.1.0a5)
+
+**Merged pull requests:**
+
+- ci: release safely after fork merges [\#33](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/33) ([goldyfruit](https://github.com/goldyfruit))
+- fix: advance last\_seen atomically [\#32](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/32) ([goldyfruit](https://github.com/goldyfruit))
+- Use indexed API-key lookup and larger Redis pool [\#31](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/31) ([goldyfruit](https://github.com/goldyfruit))
+
 ## [0.1.0a4](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.0a4) (2026-07-04)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a3...0.1.0a4)
