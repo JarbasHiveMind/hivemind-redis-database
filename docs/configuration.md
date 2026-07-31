@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All settings are passed in the `hivemind-redis-db-plugin` block of
+Pass all settings in the `hivemind-redis-db-plugin` block of
 `~/.config/hivemind-core/server.json`.
 
 | Setting | Default | Description |
@@ -9,21 +9,21 @@ All settings are passed in the `hivemind-redis-db-plugin` block of
 | `subfolder` | `"hivemind-core"` | HiveMind-core database contract field. Not used for Redis key naming. |
 | `host` | `"127.0.0.1"` | Redis host for single-node mode. |
 | `port` | `6379` | Redis port. |
-| `db` | `0` | Redis DB number (single-node only; ignored in cluster mode). |
+| `db` | `0` | Redis DB number (single-node only. Ignored in cluster mode). |
 | `username` | `"default"` | Redis ACL username. |
-| `password` | — | Redis password. |
+| `password` | none | Redis password. |
 | `index_prefix` | `"client"` | Key namespace prefix used inside Redis. |
-| `cluster_nodes` | — | List of `{"host": ..., "port": ...}` dicts for Redis Cluster startup. Presence triggers cluster mode. |
-| `cluster_hash_tag` | — | Fixed hash tag for one-slot transactional writes. Recommended for new cluster deployments. |
+| `cluster_nodes` | none | List of `{"host": ..., "port": ...}` dicts for Redis Cluster startup. Presence triggers cluster mode. |
+| `cluster_hash_tag` | none | Fixed hash tag for one-slot transactional writes. Recommended for new cluster deployments. |
 | `max_connections` | `5` | Redis connection pool size. |
 | `retry_attempts` | `3` | Internal retry count for transient operations. |
 | `retry_delay` | `0.1` | Seconds between retry attempts. |
 | `use_ssl` | `false` | Enable TLS. |
-| `ssl` | — | Backward-compatible alias for `use_ssl`. Prefer `use_ssl` in new configs. |
-| `ssl_certfile` | — | Path to client certificate (mTLS). |
-| `ssl_keyfile` | — | Path to client key (mTLS). |
-| `ssl_ca_certs` | — | Path to CA bundle. |
-| `ssl_cert_reqs` | — | TLS verification mode: `"required"`, `"optional"`, or `"none"`. |
+| `ssl` | none | Backward-compatible alias for `use_ssl`. Prefer `use_ssl` in new configs. |
+| `ssl_certfile` | none | Path to client certificate (mTLS). |
+| `ssl_keyfile` | none | Path to client key (mTLS). |
+| `ssl_ca_certs` | none | Path to CA bundle. |
+| `ssl_cert_reqs` | none | TLS verification mode: `"required"`, `"optional"`, or `"none"`. |
 | `ssl_check_hostname` | `true` | Hostname validation. Forced off when `ssl_cert_reqs="none"`. |
 
 ## Single Redis
@@ -90,3 +90,6 @@ transitional period. See [cluster_consistency.md](cluster_consistency.md).
   }
 }
 ```
+
+---
+[← Architecture](architecture.md) · [Home](../README.md) · [Cluster Consistency →](cluster_consistency.md)
