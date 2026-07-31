@@ -11,9 +11,9 @@ hivemind_plugin_manager.database.AbstractDB   (abstract)
                 └─ redis.cluster.RedisCluster (cluster mode)
 ```
 
-`RedisDB` auto-detects single-node vs. cluster by trying a `CLUSTER INFO`
-command after connecting. If the node reports `cluster_enabled:1`, it switches
-to `RedisCluster`.
+`RedisDB` auto-detects single-node vs. cluster mode. It tries a `CLUSTER INFO`
+command after connecting. If the node reports `cluster_enabled:1`, `RedisDB`
+switches to `RedisCluster`.
 
 ## Key schema
 
@@ -43,33 +43,33 @@ client:{clients}:count
 client:{clients}:id_seq
 ```
 
-The hash tag forces all keys into the same hash slot, enabling
+The hash tag forces all keys into the same hash slot. This enables
 `RedisCluster.pipeline(transaction=True)` for atomic multi-key writes.
 
 ## RediSearch acceleration
 
 When the RediSearch module is loaded (`MODULE LIST` returns a module named
-`search`), `RedisDB` creates a secondary FT index over the hash records and
+`search`), `RedisDB` creates a secondary FT index over the hash records. It
 uses `FT.SEARCH` for `search_by_value("name", ...)` and
 `search_by_value("api_key", ...)`.
 
-Without RediSearch the backend falls back to Redis set-index lookups. Either
-way, search remains **exact-match** — RediSearch is used as an accelerator,
-not for full-text or fuzzy queries.
+Without RediSearch, the backend falls back to Redis set-index lookups. Either
+way, search stays exact-match. RediSearch works as an accelerator, not for
+full-text or fuzzy queries.
 
 ## sync()
 
 `sync()` rebuilds the derived keys (counters, set indexes, RediSearch hash
 documents) from the authoritative `<prefix>:client:<id>` hash records. It is
-a recovery tool, not a transaction boundary — use it after interrupted writes
+a recovery tool, not a transaction boundary. Use it after interrupted writes
 or manual Redis changes.
 
 ## Schema migration
 
-`hivemind-plugin-manager`'s `AbstractDB.migrate()` contract is implemented but
-the Redis backend does not track a persistent schema version on disk (there is
-no SQLite `PRAGMA user_version` equivalent). Migrations are handled at the
-application level.
+`hivemind-plugin-manager`'s `AbstractDB.migrate()` contract is implemented,
+but the Redis backend does not track a persistent schema version on disk
+(there is no SQLite `PRAGMA user_version` equivalent). Migrations happen at
+the application level.
 
 For Redis Cluster migrations (moving from the legacy untagged key layout to
 the `cluster_hash_tag` layout), use the provided CLI tool:
@@ -87,4 +87,7 @@ plan and rollback procedure.
 
 See [hivemind-sqlite-database: authoring a plugin](https://github.com/JarbasHiveMind/hivemind-sqlite-database/blob/dev/docs/operations.md#authoring-a-database-backend-plugin)
 for the `AbstractDB` contract and `pyproject.toml` entry-point registration pattern.
-The contract is the same regardless of which storage technology you use underneath.
+The contract stays the same regardless of the storage technology underneath.
+
+---
+[Home](../README.md) · [Configuration →](configuration.md)

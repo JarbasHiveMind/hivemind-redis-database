@@ -3,7 +3,7 @@
 ## Backup
 
 The `hivemind-redis-migrate-cluster` CLI tool copies records between Redis
-namespaces and can be used for manual exports. For a full snapshot, use
+namespaces and works for manual exports too. For a full snapshot, use
 standard Redis persistence tools:
 
 ```bash
@@ -28,8 +28,8 @@ assert db.health_check()
 
 ## Repairing inconsistency
 
-If Redis indexes drift from the authoritative hash records (e.g. after an
-interrupted write or manual key deletion), run:
+If Redis indexes drift from the authoritative hash records (for example after
+an interrupted write or a manual key deletion), run:
 
 ```python
 db.sync()
@@ -58,3 +58,6 @@ Then update `server.json` to set `database.module` to `hivemind-redis-db-plugin`
 
 See [hivemind-sqlite-database: authoring a plugin](https://github.com/JarbasHiveMind/hivemind-sqlite-database/blob/dev/docs/operations.md#authoring-a-database-backend-plugin)
 for the `AbstractDB` contract and entry-point registration pattern.
+
+---
+[← Cluster Consistency](cluster_consistency.md) · [Home](../README.md)
