@@ -201,6 +201,7 @@ class RedisDBTests(unittest.TestCase):
         self.assertEqual(db.host, "127.0.0.1")
         self.assertEqual(db.port, 6379)
         self.assertEqual(db.subfolder, "hivemind-core")
+        self.assertEqual(db.max_connections, 50)
 
     def test_ssl_alias_is_accepted(self):
         fake_redis = FakeRedis()
