@@ -54,7 +54,7 @@ class RedisDB(AbstractRemoteDB):
         cluster_nodes (Optional[List[dict]]): Redis Cluster node configuration
         cluster_hash_tag (Optional[str]): Fixed Redis Cluster hash tag for single-slot writes
         index_prefix (str): Key prefix for all database operations (default: "client")
-        max_connections (int): Maximum connection pool size (default: 5)
+        max_connections (int): Maximum connection pool size (default: 50)
         retry_attempts (int): Number of retry attempts (default: 3)
         retry_delay (float): Delay between retry attempts in seconds (default: 0.1)
         use_ssl (bool): Enable SSL/TLS connection (default: False)
@@ -73,7 +73,7 @@ class RedisDB(AbstractRemoteDB):
     cluster_nodes: Optional[List[dict]] = None
     cluster_hash_tag: Optional[str] = None
     index_prefix: str = "client"
-    max_connections: int = 5
+    max_connections: int = 50
     retry_attempts: int = 3
     retry_delay: float = 0.1
     use_ssl: bool = False

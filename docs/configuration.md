@@ -15,7 +15,7 @@ Pass all settings in the `hivemind-redis-db-plugin` block of
 | `index_prefix` | `"client"` | Key namespace prefix used inside Redis. |
 | `cluster_nodes` | none | List of `{"host": ..., "port": ...}` dicts for Redis Cluster startup. Presence triggers cluster mode. |
 | `cluster_hash_tag` | none | Fixed hash tag for one-slot transactional writes. Recommended for new cluster deployments. |
-| `max_connections` | `5` | Redis connection pool size. |
+| `max_connections` | `50` | Redis connection pool size. Every client connect and every message does a DB round trip, so the default is sized for real load, not a smoke test; raise it further for large deployments. |
 | `retry_attempts` | `3` | Internal retry count for transient operations. |
 | `retry_delay` | `0.1` | Seconds between retry attempts. |
 | `use_ssl` | `false` | Enable TLS. |

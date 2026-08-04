@@ -157,7 +157,7 @@ there. This backend accepts it, but does not use it for Redis namespacing.
 | `index_prefix` | Actual Redis namespace prefix this backend uses | Default: `"client"` |
 | `cluster_nodes` | Explicit Redis Cluster startup nodes | Accepts the documented `[{\"host\": ..., \"port\": ...}]` shape |
 | `cluster_hash_tag` | Fixed hash tag for one-slot transactional writes in cluster mode | Recommended for new cluster deployments |
-| `max_connections` | Redis connection pool size | Default: `5` |
+| `max_connections` | Redis connection pool size | Default: `50` |
 | `retry_attempts` | Internal retry attempts for transient operations | Default: `3` |
 | `retry_delay` | Delay between retry attempts | Default: `0.1` seconds |
 | `use_ssl` | Enable TLS | Default: `false` |
