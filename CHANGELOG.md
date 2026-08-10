@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a2) (2026-08-10)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a1...0.1.1a2)
+
+**Merged pull requests:**
+
+- chore\(ci\): drop the broken, redundant Dependabot config [\#42](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/42) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.1.1a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a1) (2026-08-04)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.0a7...0.1.1a1)
@@ -81,6 +89,60 @@
 **Merged pull requests:**
 
 - Preserve client metadata \(supersedes \#17\) [\#18](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/18) ([JarbasAl](https://github.com/JarbasAl))
+
+## [0.0.3](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3) (2026-04-14)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3a2...0.0.3)
+
+## [0.0.3a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a2) (2026-04-14)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.3a1...0.0.3a2)
+
+**Implemented enhancements:**
+
+- Refactoring [\#7](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/7) ([goldyfruit](https://github.com/goldyfruit))
+
+**Merged pull requests:**
+
+- ci: modernize workflows to OpenVoiceOS standards [\#14](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/14) ([JarbasAl](https://github.com/JarbasAl))
+- Release 0.0.3a1 [\#9](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/9) ([github-actions[bot]](https://github.com/apps/github-actions))
+
+## [0.0.3a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.3a1) (2025-12-18)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.2...0.0.3a1)
+
+**Merged pull requests:**
+
+- chore: Configure Renovate [\#8](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/8) ([renovate[bot]](https://github.com/apps/renovate))
+
+## [0.0.2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.2) (2024-12-29)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.2a2...0.0.2)
+
+**Merged pull requests:**
+
+- Release 0.0.2a2 [\#5](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/5) ([github-actions[bot]](https://github.com/apps/github-actions))
+
+## [0.0.2a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.2a2) (2024-12-29)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.2a1...0.0.2a2)
+
+**Merged pull requests:**
+
+- fix: missing hivemind entrypoint in setup.py [\#4](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/4) ([JarbasAl](https://github.com/JarbasAl))
+
+## [0.0.2a1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.2a1) (2024-12-29)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.0.1...0.0.2a1)
+
+**Merged pull requests:**
+
+- Release 0.0.2a1 [\#3](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/3) ([github-actions[bot]](https://github.com/apps/github-actions))
+- fix: missing hivemind entrypoint in setup.py [\#2](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/2) ([JarbasAl](https://github.com/JarbasAl))
+
+## [0.0.1](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.0.1) (2024-12-28)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/696592dac1fbb7312b0fb034f9586122ccfd4b1e...0.0.1)
 
 
 
