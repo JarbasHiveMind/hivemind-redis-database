@@ -50,6 +50,7 @@ def _lookup_logger():
                 if stale is not None:
                     for handler in list(stale.handlers):
                         stale.removeHandler(handler)
+                        handler.close()
                 _LOOKUP_LOGGER = LOG.create_logger(name)
                 _LOOKUP_LOGGER_KEY = key
     return _LOOKUP_LOGGER

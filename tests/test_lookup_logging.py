@@ -35,6 +35,7 @@ class TestLookupLogging(unittest.TestCase):
         stale = logging.getLogger(name)
         for handler in list(stale.handlers):
             stale.removeHandler(handler)
+            handler.close()
         hrd.LOG._loggers.pop(name, None)
         hrd._LOOKUP_LOGGER = None
         hrd._LOOKUP_LOGGER_KEY = None
@@ -90,6 +91,7 @@ class TestLookupLoggerLifecycle(unittest.TestCase):
         stale = logging.getLogger(name)
         for handler in list(stale.handlers):
             stale.removeHandler(handler)
+            handler.close()
         hrd.LOG._loggers.pop(name, None)
         hrd._LOOKUP_LOGGER = None
         hrd._LOOKUP_LOGGER_KEY = None
