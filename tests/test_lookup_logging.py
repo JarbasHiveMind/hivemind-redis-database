@@ -18,6 +18,7 @@ from test_redisdb import FakeRedis, make_client
 class TestLookupLogging(unittest.TestCase):
     def setUp(self):
         hrd._LOOKUP_LOGGER = None
+        hrd._LOOKUP_LOGGER_KEY = None
         self.redis = FakeRedis()
         db = object.__new__(RedisDB)
         db.redis = self.redis
@@ -30,7 +31,13 @@ class TestLookupLogging(unittest.TestCase):
         self.db.add_item(make_client(client_id=1, name="sat", api_key="key-1"))
 
     def tearDown(self):
+        name = f"{hrd.LOG.name} - {hrd.__name__}"
+        stale = logging.getLogger(name)
+        for handler in list(stale.handlers):
+            stale.removeHandler(handler)
+        hrd.LOG._loggers.pop(name, None)
         hrd._LOOKUP_LOGGER = None
+        hrd._LOOKUP_LOGGER_KEY = None
 
     def test_lookup_does_not_use_the_stack_walking_logger(self):
         """LOG.debug is the expensive one; the lookup must not call it."""
@@ -58,11 +65,15 @@ class TestLookupLogging(unittest.TestCase):
         finally:
             hrd.LOG.set_level(previous)
 
-    def test_debug_output_is_still_produced_when_enabled(self):
-        hrd._lookup_logger().setLevel(logging.DEBUG)
-
-        with self.assertLogs(hrd._lookup_logger(), level="DEBUG") as captured:
-            self.db.search_by_value("api_key", "key-1")
+    def test_debug_output_is_still_produced_with_level_restored(self):
+        log = hrd._lookup_logger()
+        previous = log.level
+        try:
+            log.setLevel(logging.DEBUG)
+            with self.assertLogs(log, level="DEBUG") as captured:
+                self.db.search_by_value("api_key", "key-1")
+        finally:
+            log.setLevel(previous)
 
         joined = "\n".join(captured.output)
         self.assertIn("api_key", joined)
@@ -71,3 +82,48 @@ class TestLookupLogging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLookupLoggerLifecycle(unittest.TestCase):
+    def tearDown(self):
+        name = f"{hrd.LOG.name} - {hrd.__name__}"
+        stale = logging.getLogger(name)
+        for handler in list(stale.handlers):
+            stale.removeHandler(handler)
+        hrd.LOG._loggers.pop(name, None)
+        hrd._LOOKUP_LOGGER = None
+        hrd._LOOKUP_LOGGER_KEY = None
+
+    def test_logger_rewires_after_log_init_changes_base_path(self):
+        """init after first use must not strand this path on stdout-only."""
+        import tempfile
+        hrd._lookup_logger()
+        previous = hrd.LOG.base_path
+        try:
+            with tempfile.TemporaryDirectory() as base:
+                hrd.LOG.base_path = base
+                kinds = {type(h).__name__
+                         for h in hrd._lookup_logger().handlers}
+                self.assertIn("RotatingFileHandler", kinds)
+        finally:
+            hrd.LOG.base_path = previous
+
+    def test_concurrent_first_use_attaches_handlers_once(self):
+        import threading
+        gate = threading.Event()
+
+        def resolve():
+            gate.wait()
+            hrd._lookup_logger()
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        gate.set()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        handlers = hrd._lookup_logger().handlers
+        streams = [h for h in handlers
+                   if type(h).__name__ == "StreamHandler"]
+        self.assertLessEqual(len(streams), 1)

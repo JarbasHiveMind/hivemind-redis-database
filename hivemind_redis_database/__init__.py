@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Union
 import json
+import threading
 import time
 
 import redis
@@ -23,13 +24,34 @@ CREATE_MARKER_TTL = 30
 #: level. Only the per-call stack walk is dropped. Resolved lazily because
 #: ``LOG.init`` usually runs after import.
 _LOOKUP_LOGGER = None
+_LOOKUP_LOGGER_KEY = None
+_LOOKUP_LOGGER_LOCK = threading.Lock()
 
 
 def _lookup_logger():
-    """Return the cached lookup-path logger, creating it on first use."""
-    global _LOOKUP_LOGGER
-    if _LOOKUP_LOGGER is None:
-        _LOOKUP_LOGGER = LOG.create_logger(f"{LOG.name} - {__name__}")
+    """Return the cached lookup-path logger, rebuilding when LOG rewires.
+
+    Cached against ``(LOG.name, LOG.base_path)``: ``LOG.init()`` normally runs
+    after import, and a logger created before it would carry only the stdout
+    handler -- configured file logging would silently vanish from this path,
+    because init does not rebuild handlers on existing loggers. When the
+    fingerprint changes, the stale entry and its handlers are dropped so
+    ``create_logger`` rebuilds against the live config. The lock keeps two
+    racing admissions from attaching duplicate handlers to the same
+    process-wide ``logging.getLogger`` name.
+    """
+    global _LOOKUP_LOGGER, _LOOKUP_LOGGER_KEY
+    key = (LOG.name, LOG.base_path)
+    if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+        with _LOOKUP_LOGGER_LOCK:
+            if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+                name = f"{LOG.name} - {__name__}"
+                stale = LOG._loggers.pop(name, None)
+                if stale is not None:
+                    for handler in list(stale.handlers):
+                        stale.removeHandler(handler)
+                _LOOKUP_LOGGER = LOG.create_logger(name)
+                _LOOKUP_LOGGER_KEY = key
     return _LOOKUP_LOGGER
 
 
