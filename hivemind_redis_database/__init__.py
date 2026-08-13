@@ -15,6 +15,24 @@ CREATE_MARKER = "__hivemind_creating__"
 CREATE_MARKER_TTL = 30
 
 
+#: Lookup-path logger, resolved once.
+#:
+#: ``LOG.create_logger`` returns the same OVOS-configured logger ``LOG.debug``
+#: would have built -- same formatter and handlers -- and registers it in
+#: ``LOG._loggers``, so ``LOG.init``/``LOG.set_level`` still retargets its
+#: level. Only the per-call stack walk is dropped. Resolved lazily because
+#: ``LOG.init`` usually runs after import.
+_LOOKUP_LOGGER = None
+
+
+def _lookup_logger():
+    """Return the cached lookup-path logger, creating it on first use."""
+    global _LOOKUP_LOGGER
+    if _LOOKUP_LOGGER is None:
+        _LOOKUP_LOGGER = LOG.create_logger(f"{LOG.name} - {__name__}")
+    return _LOOKUP_LOGGER
+
+
 def _iter_client_records_safely(db) -> "Iterable[tuple[str, str]]":
     """Yield (key, raw_value) pairs for every stored client record in the
     active namespace. Used by ``migrate()`` to rewrite records in place.
@@ -894,11 +912,19 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             List of matching clients
         """
-        LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
+        # Lazy args, and a logger resolved once: this is the admission path.
+        # ``LOG.debug`` walks ``inspect.stack()`` before it checks the level,
+        # so these two lines cost ~1.07 ms per lookup on a node that is not
+        # even running at DEBUG -- more than the Redis round trips they
+        # describe. The walk gets more expensive the deeper the stack, and a
+        # lookup from Core's admission path is deep.
+        log = _lookup_logger()
+        log.debug("Searching for clients by indexed field '%s' with value '%s'",
+                  key, val)
         client_ids = self.redis.smembers(self._key(key, val))
         client_keys = [self._client_key(cid) for cid in client_ids]
         res = self._load_clients(client_keys)
-        LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
+        log.debug("Found %d clients matching '%s=%s'", len(res), key, val)
         return res
 
     def _search_brute_force(self, key: str, val) -> List[Client]:
