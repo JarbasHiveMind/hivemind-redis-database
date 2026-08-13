@@ -204,6 +204,29 @@ class RedisDB(AbstractRemoteDB):
     def _api_key_index_key(self, api_key: str) -> str:
         return self._key("api_key", api_key)
 
+    def _api_key_record_key(self) -> str:
+        """Hash of ``api_key -> serialized client``, the admission fast path.
+
+        One field per live API key. It is a cache, never the source of truth:
+        every write path drops the affected fields and the next lookup
+        rebuilds them from the authoritative record.
+        """
+        return self._key("api_key_records")
+
+    def _invalidate_api_key_records(self, *api_keys, writer=None) -> None:
+        """Drop cached admission records for ``api_keys``.
+
+        ``writer`` lets a caller fold this into an existing pipeline so the
+        invalidation lands in the same transaction as the write that caused
+        it. Skipped in legacy cluster mode, which never populates the hash.
+        """
+        if self._legacy_cluster_mode():
+            return
+        fields = [str(k) for k in api_keys if k]
+        if not fields:
+            return
+        (writer or self.redis).hdel(self._api_key_record_key(), *fields)
+
     def _search_doc_key(self, client_id: Union[str, int]) -> str:
         return self._key("idx", client_id)
 
@@ -660,6 +683,7 @@ class RedisDB(AbstractRemoteDB):
                 "api_key": client.api_key,
             })
             p.incr(self._counter_key())
+            self._invalidate_api_key_records(client.api_key, writer=p)
             p.execute()
             
             LOG.debug(f"Successfully added client '{client.client_id}'")
@@ -730,6 +754,9 @@ class RedisDB(AbstractRemoteDB):
                 "name": "",
                 "api_key": "revoked",
             })
+            # Revocation must take effect on the next admission, not on the
+            # next sync: drop the cached record in the same transaction.
+            self._invalidate_api_key_records(old_api_key, writer=p)
 
             p.execute()
 
@@ -812,7 +839,12 @@ class RedisDB(AbstractRemoteDB):
                 "name": client.name,
                 "api_key": client.api_key,
             })
-            
+            # Drop both keys: is_admin, allowed_types, password and crypto_key
+            # can change without the API key changing, and admission reads all
+            # of them off this record.
+            self._invalidate_api_key_records(
+                old_client.api_key, client.api_key, writer=p)
+
             p.execute()
             LOG.debug(f"Successfully updated client '{client.client_id}'")
             return True
@@ -919,6 +951,60 @@ class RedisDB(AbstractRemoteDB):
                     res.append(client)
         return res
 
+    def _authoritative_client_by_api_key(self, api_key: str) -> Optional[Client]:
+        """Resolve an API key the slow, always-correct way.
+
+        Same route ``AbstractDB.get_client_by_api_key`` takes. Spelled out
+        rather than delegated to ``super()`` so this backend keeps working on
+        its declared ``hivemind-plugin-manager>=0.5.0`` floor, which predates
+        that base method.
+        """
+        matches = self.search_by_value("api_key", api_key)
+        return matches[0] if matches else None
+
+    def get_client_by_api_key(self, api_key: str) -> Optional[Client]:
+        """Return the client for ``api_key``, usually in a single ``HGET``.
+
+        ``AbstractDB`` resolves this through :meth:`search_by_value`, which
+        costs two round trips here — an index or RediSearch lookup for the
+        client id, then a fetch of the record itself. hivemind-core calls this
+        on every connection admission, so the pair is paid per handshake.
+
+        A materialized hash collapses the steady state to one round trip. It
+        is only ever a cache: a hit is accepted only if the stored record still
+        carries the key it was filed under, and every write path invalidates
+        the fields it touches, so a miss simply falls back to the authoritative
+        lookup and refills the hash.
+        """
+        if api_key is None:
+            return None
+        api_key = str(api_key)
+
+        if self._legacy_cluster_mode():
+            # Cross-slot writes are already degraded here; keep the existing
+            # behaviour rather than adding a second consistency surface.
+            return self._authoritative_client_by_api_key(api_key)
+
+        record_key = self._api_key_record_key()
+        raw = self.redis.hget(record_key, api_key)
+        if raw:
+            client = None
+            try:
+                client = self._deserialize_client(raw)
+                self._ensure_client_attributes(client)
+            except Exception as e:
+                LOG.warning(f"Discarding unreadable admission record: {e}")
+            # A record that no longer carries this key was rotated or revoked
+            # behind our back. Never admit on it.
+            if client is not None and client.api_key == api_key:
+                return client
+            self.redis.hdel(record_key, api_key)
+
+        client = self._authoritative_client_by_api_key(api_key)
+        if client is not None and client.api_key == api_key:
+            self.redis.hset(record_key, api_key, client.serialize())
+        return client
+
     def search_by_value(self, key: str, val) -> List[Client]:
         """
         Search for clients by a specific key-value pair in Redis.
@@ -981,6 +1067,9 @@ class RedisDB(AbstractRemoteDB):
             p = self._pipeline()
             for key in index_keys:
                 p.delete(key)
+            # sync() repairs drift; the admission cache is derived state, so
+            # it goes too and is rebuilt lazily.
+            p.delete(self._api_key_record_key())
 
             p.set(self._counter_key(), len(client_records))
             p.set(self._id_sequence_key(), max_client_id)
