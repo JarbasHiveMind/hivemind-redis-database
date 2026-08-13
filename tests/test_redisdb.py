@@ -882,8 +882,7 @@ class TestApiKeyAdmissionRecords(unittest.TestCase):
         self.db.add_item(self.client)
 
     def _record_field(self, api_key):
-        return self.redis.hashes.get(
-            self.db._api_key_record_key(), {}).get(api_key)
+        return self.redis.storage.get(self.db._api_key_record_key(api_key))
 
     def test_first_lookup_materializes_the_record(self):
         found = self.db.get_client_by_api_key("key-1")
@@ -938,8 +937,7 @@ class TestApiKeyAdmissionRecords(unittest.TestCase):
     def test_record_filed_under_the_wrong_key_is_never_admitted(self):
         """Belt and braces: a hand-corrupted hash must not authenticate."""
         other = make_client(client_id=2, name="other", api_key="key-2")
-        self.redis.hset(self.db._api_key_record_key(), "key-1",
-                        other.serialize())
+        self.redis.set(self.db._api_key_record_key("key-1"), other.serialize())
 
         found = self.db.get_client_by_api_key("key-1")
 
@@ -947,7 +945,7 @@ class TestApiKeyAdmissionRecords(unittest.TestCase):
         self.assertEqual(found.api_key, "key-1")
 
     def test_unreadable_record_falls_back_instead_of_raising(self):
-        self.redis.hset(self.db._api_key_record_key(), "key-1", "{not json")
+        self.redis.set(self.db._api_key_record_key("key-1"), "{not json")
 
         found = self.db.get_client_by_api_key("key-1")
 
@@ -960,14 +958,64 @@ class TestApiKeyAdmissionRecords(unittest.TestCase):
 
         self.assertIsNone(self._record_field("key-1"))
 
+
+    # --- the cache is derived state: it may never refuse a valid client ---
+
+    def test_cache_read_failure_falls_back_to_authoritative(self):
+        """A WRONGTYPE or a Redis hiccup on the cache must not fail admission."""
+        real = self.redis.get
+        cache_key = self.db._api_key_record_key("key-1")
+
+        def boom(key):
+            # Fail only the cache key, exactly as WRONGTYPE would after a
+            # manual edit or prefix reuse; the client records stay readable.
+            if key == cache_key:
+                raise redis.exceptions.ResponseError("WRONGTYPE")
+            return real(key)
+        self.redis.get = boom
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertIsNotNone(found, "a broken cache refused a valid client")
+        self.assertEqual(found.client_id, 1)
+
+    def test_cache_write_failure_does_not_fail_admission(self):
+        def boom(*a, **k):
+            raise redis.exceptions.ResponseError("OOM")
+        self.redis.set = boom
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(found.client_id, 1)
+
+    def test_refill_sets_an_expiry(self):
+        """A refill that loses a race with an invalidation must self-heal."""
+        seen = {}
+        real = self.redis.set
+
+        def spy(key, value, nx=False, ex=None):
+            seen["ex"] = ex
+            return real(key, value, nx=nx, ex=ex)
+        self.redis.set = spy
+
+        self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(seen.get("ex"), self.db.ADMISSION_CACHE_TTL,
+                         "cached admission records must expire, or a refill "
+                         "that races an invalidation stays valid forever")
+
+    def test_each_api_key_gets_its_own_key(self):
+        """Per-key entries, so one DELETE cannot be cross-slot on a cluster."""
+        self.assertNotEqual(self.db._api_key_record_key("a"),
+                            self.db._api_key_record_key("b"))
+
     def test_legacy_cluster_mode_does_not_use_the_cache(self):
         self.db.is_cluster = True
         self.db.cluster_hash_tag = None
 
         self.db.get_client_by_api_key("key-1")
 
-        self.assertEqual(self.redis.hashes.get(
-            self.db._api_key_record_key(), {}), {})
+        self.assertIsNone(self._record_field("key-1"))
 
 
 if __name__ == "__main__":

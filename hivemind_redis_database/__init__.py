@@ -204,28 +204,47 @@ class RedisDB(AbstractRemoteDB):
     def _api_key_index_key(self, api_key: str) -> str:
         return self._key("api_key", api_key)
 
-    def _api_key_record_key(self) -> str:
-        """Hash of ``api_key -> serialized client``, the admission fast path.
+    #: How long a cached admission record may outlive an invalidation it
+    #: raced with. A refill reads the authoritative record and then writes the
+    #: cache; an update landing between those two steps would otherwise be
+    #: undone by the refill and persist until the next write or ``sync()``.
+    #: The window is sub-millisecond and the expiry bounds what a lost race
+    #: can cost, so a revoked or demoted client cannot stay admitted.
+    #: ``SET ... EX`` is used rather than ``HEXPIRE`` because that needs Redis
+    #: 7.4 and this backend only declares ``redis>=4.2.0``.
+    ADMISSION_CACHE_TTL = 60
 
-        One field per live API key. It is a cache, never the source of truth:
-        every write path drops the affected fields and the next lookup
-        rebuilds them from the authoritative record.
+    def _api_key_record_key(self, api_key: str) -> str:
+        """Key holding the serialized client for ``api_key``.
+
+        One expiring key per live API key, never the source of truth: every
+        write path drops the keys it affects and the next lookup rebuilds
+        them from the authoritative record.
         """
-        return self._key("api_key_records")
+        return self._key("api_key_record", api_key)
 
     def _invalidate_api_key_records(self, *api_keys, writer=None) -> None:
         """Drop cached admission records for ``api_keys``.
 
         ``writer`` lets a caller fold this into an existing pipeline so the
         invalidation lands in the same transaction as the write that caused
-        it. Skipped in legacy cluster mode, which never populates the hash.
+        it. Skipped in legacy cluster mode, which never populates the cache.
         """
         if self._legacy_cluster_mode():
             return
-        fields = [str(k) for k in api_keys if k]
-        if not fields:
-            return
-        (writer or self.redis).hdel(self._api_key_record_key(), *fields)
+        target = writer if writer is not None else self.redis
+        for api_key in api_keys:
+            if not api_key:
+                continue
+            # One key per call: a multi-key DELETE would be cross-slot on a
+            # cluster without a hash tag.
+            try:
+                target.delete(self._api_key_record_key(str(api_key)))
+            except Exception as e:
+                # Losing an invalidation would leave a stale credential
+                # admitted, so this must be loud even though it is survivable
+                # (the record expires within ADMISSION_CACHE_TTL).
+                LOG.error(f"Failed to invalidate admission cache: {e}")
 
     def _search_doc_key(self, client_id: Union[str, int]) -> str:
         return self._key("idx", client_id)
@@ -985,8 +1004,16 @@ class RedisDB(AbstractRemoteDB):
             # behaviour rather than adding a second consistency surface.
             return self._authoritative_client_by_api_key(api_key)
 
-        record_key = self._api_key_record_key()
-        raw = self.redis.hget(record_key, api_key)
+        record_key = self._api_key_record_key(api_key)
+        # The cache is derived state, so every failure below degrades to the
+        # authoritative lookup. A broken cache must never refuse a client the
+        # authoritative record would have admitted.
+        try:
+            raw = self.redis.get(record_key)
+        except Exception as e:
+            LOG.warning(f"Admission cache read failed, falling back: {e}")
+            raw = None
+
         if raw:
             client = None
             try:
@@ -994,15 +1021,22 @@ class RedisDB(AbstractRemoteDB):
                 self._ensure_client_attributes(client)
             except Exception as e:
                 LOG.warning(f"Discarding unreadable admission record: {e}")
-            # A record that no longer carries this key was rotated or revoked
-            # behind our back. Never admit on it.
+            # A record that no longer carries this key was rotated behind our
+            # back. Never admit on it.
             if client is not None and client.api_key == api_key:
                 return client
-            self.redis.hdel(record_key, api_key)
+            try:
+                self.redis.delete(record_key)
+            except Exception as e:
+                LOG.warning(f"Failed to drop invalid admission record: {e}")
 
         client = self._authoritative_client_by_api_key(api_key)
         if client is not None and client.api_key == api_key:
-            self.redis.hset(record_key, api_key, client.serialize())
+            try:
+                self.redis.set(record_key, client.serialize(),
+                               ex=self.ADMISSION_CACHE_TTL)
+            except Exception as e:
+                LOG.warning(f"Admission cache refill failed: {e}")
         return client
 
     def search_by_value(self, key: str, val) -> List[Client]:
@@ -1060,6 +1094,9 @@ class RedisDB(AbstractRemoteDB):
             for pattern in (
                 self._scan_pattern("name"),
                 self._scan_pattern("api_key"),
+                # sync() repairs drift, and the admission cache is derived
+                # state, so it is dropped here too and rebuilt lazily.
+                self._scan_pattern("api_key_record"),
                 self._scan_pattern("idx"),
             ):
                 index_keys.extend(list(self.redis.scan_iter(pattern, count=100)))
@@ -1067,9 +1104,6 @@ class RedisDB(AbstractRemoteDB):
             p = self._pipeline()
             for key in index_keys:
                 p.delete(key)
-            # sync() repairs drift; the admission cache is derived state, so
-            # it goes too and is rebuilt lazily.
-            p.delete(self._api_key_record_key())
 
             p.set(self._counter_key(), len(client_records))
             p.set(self._id_sequence_key(), max_client_id)
