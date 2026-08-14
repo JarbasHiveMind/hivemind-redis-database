@@ -25,6 +25,7 @@ class FakeRedis:
         self.connection_pool = Mock()
         self.pipeline_transaction_flags = []
         self.mget_calls = []
+        self.hget_calls = []
 
     def exists(self, key):
         return key in self.storage or key in self.hashes
@@ -82,10 +83,23 @@ class FakeRedis:
         members = self.storage.get(key, set())
         return set(members) if isinstance(members, set) else set()
 
-    def hset(self, key, mapping):
+    def hset(self, key, *args, mapping=None):
+        """Supports both ``hset(key, mapping=...)`` and ``hset(key, f, v)``."""
         values = self.hashes.setdefault(key, {})
-        values.update(mapping)
+        if mapping:
+            values.update(mapping)
+        if args:
+            field, value = args
+            values[field] = value
         return 1
+
+    def hget(self, key, field):
+        self.hget_calls.append((key, field))
+        return self.hashes.get(key, {}).get(field)
+
+    def hdel(self, key, *fields):
+        values = self.hashes.get(key, {})
+        return sum(1 for f in fields if values.pop(f, None) is not None)
 
     def scan_iter(self, pattern, count=None):
         del count
@@ -124,6 +138,10 @@ class FakePipeline:
 
     def hset(self, *args, **kwargs):
         self.commands.append(("hset", args, kwargs))
+        return self
+
+    def hdel(self, *args, **kwargs):
+        self.commands.append(("hdel", args, kwargs))
         return self
 
     def delete(self, *args, **kwargs):
@@ -836,6 +854,168 @@ class TestRedisDBSchemaV2RoundTrip(unittest.TestCase):
         self.assertEqual(got.allowed_types, allowed)
         self.assertEqual(got.skill_blacklist, ["s:1"])
         self.assertEqual(got.intent_blacklist, ["i:1"])
+
+
+class TestApiKeyAdmissionRecords(unittest.TestCase):
+    """The materialized admission hash is a cache and must behave like one.
+
+    hivemind-core resolves an API key on every connection admission, so the
+    steady state must be one round trip -- and a stale entry must never admit
+    a client whose credentials changed or were revoked.
+    """
+
+    def build_db(self, redis_client):
+        db = object.__new__(RedisDB)
+        db.redis = redis_client
+        db.redis_pool = redis_client.connection_pool
+        db.index_prefix = "client"
+        db.redisearch_available = False
+        db.is_cluster = False
+        db.cluster_hash_tag = None
+        return db
+
+    def setUp(self):
+        self.redis = FakeRedis()
+        self.db = self.build_db(self.redis)
+        self.client = make_client(client_id=1, name="satellite",
+                                  api_key="key-1", is_admin=False)
+        self.db.add_item(self.client)
+
+    def _record_field(self, api_key):
+        return self.redis.storage.get(self.db._api_key_record_key(api_key))
+
+    def test_first_lookup_materializes_the_record(self):
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.client_id, 1)
+        self.assertIsNotNone(self._record_field("key-1"))
+
+    def test_warm_lookup_costs_one_round_trip(self):
+        self.db.get_client_by_api_key("key-1")
+        self.redis.mget_calls.clear()
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(found.client_id, 1)
+        self.assertEqual(self.redis.mget_calls, [],
+                         "a warm admission must not re-read the client record")
+
+    def test_unknown_key_is_not_cached(self):
+        self.assertIsNone(self.db.get_client_by_api_key("nope"))
+        self.assertIsNone(self._record_field("nope"))
+
+    def test_revocation_takes_effect_immediately(self):
+        self.db.get_client_by_api_key("key-1")
+
+        self.db.remove_client("1")
+
+        self.assertIsNone(self.db.get_client_by_api_key("key-1"),
+                          "a revoked key must stop admitting at once")
+        self.assertIsNone(self._record_field("key-1"))
+
+    def test_promotion_is_not_served_from_a_stale_record(self):
+        """is_admin changes without the API key changing -- the case a
+        key-only invalidation would miss."""
+        self.db.get_client_by_api_key("key-1")
+
+        self.client.is_admin = True
+        self.db.update_client(self.client)
+
+        found = self.db.get_client_by_api_key("key-1")
+        self.assertTrue(found.is_admin)
+
+    def test_rotated_key_invalidates_both_old_and_new(self):
+        self.db.get_client_by_api_key("key-1")
+
+        self.client.api_key = "key-2"
+        self.db.update_client(self.client)
+
+        self.assertIsNone(self.db.get_client_by_api_key("key-1"))
+        self.assertEqual(self.db.get_client_by_api_key("key-2").client_id, 1)
+
+    def test_record_filed_under_the_wrong_key_is_never_admitted(self):
+        """Belt and braces: a hand-corrupted hash must not authenticate."""
+        other = make_client(client_id=2, name="other", api_key="key-2")
+        self.redis.set(self.db._api_key_record_key("key-1"), other.serialize())
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(found.client_id, 1)
+        self.assertEqual(found.api_key, "key-1")
+
+    def test_unreadable_record_falls_back_instead_of_raising(self):
+        self.redis.set(self.db._api_key_record_key("key-1"), "{not json")
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(found.client_id, 1)
+
+    def test_sync_drops_the_cache(self):
+        self.db.get_client_by_api_key("key-1")
+
+        self.db.sync()
+
+        self.assertIsNone(self._record_field("key-1"))
+
+
+    # --- the cache is derived state: it may never refuse a valid client ---
+
+    def test_cache_read_failure_falls_back_to_authoritative(self):
+        """A WRONGTYPE or a Redis hiccup on the cache must not fail admission."""
+        real = self.redis.get
+        cache_key = self.db._api_key_record_key("key-1")
+
+        def boom(key):
+            # Fail only the cache key, exactly as WRONGTYPE would after a
+            # manual edit or prefix reuse; the client records stay readable.
+            if key == cache_key:
+                raise redis.exceptions.ResponseError("WRONGTYPE")
+            return real(key)
+        self.redis.get = boom
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertIsNotNone(found, "a broken cache refused a valid client")
+        self.assertEqual(found.client_id, 1)
+
+    def test_cache_write_failure_does_not_fail_admission(self):
+        def boom(*a, **k):
+            raise redis.exceptions.ResponseError("OOM")
+        self.redis.set = boom
+
+        found = self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(found.client_id, 1)
+
+    def test_refill_sets_an_expiry(self):
+        """A refill that loses a race with an invalidation must self-heal."""
+        seen = {}
+        real = self.redis.set
+
+        def spy(key, value, nx=False, ex=None):
+            seen["ex"] = ex
+            return real(key, value, nx=nx, ex=ex)
+        self.redis.set = spy
+
+        self.db.get_client_by_api_key("key-1")
+
+        self.assertEqual(seen.get("ex"), self.db.ADMISSION_CACHE_TTL,
+                         "cached admission records must expire, or a refill "
+                         "that races an invalidation stays valid forever")
+
+    def test_each_api_key_gets_its_own_key(self):
+        """Per-key entries, so one DELETE cannot be cross-slot on a cluster."""
+        self.assertNotEqual(self.db._api_key_record_key("a"),
+                            self.db._api_key_record_key("b"))
+
+    def test_legacy_cluster_mode_does_not_use_the_cache(self):
+        self.db.is_cluster = True
+        self.db.cluster_hash_tag = None
+
+        self.db.get_client_by_api_key("key-1")
+
+        self.assertIsNone(self._record_field("key-1"))
 
 
 if __name__ == "__main__":
