@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Union
 import json
+import threading
 import time
 
 import redis
@@ -13,6 +14,46 @@ from hivemind_plugin_manager.database import (Client, AbstractDB,
 
 CREATE_MARKER = "__hivemind_creating__"
 CREATE_MARKER_TTL = 30
+
+
+#: Lookup-path logger, resolved once.
+#:
+#: ``LOG.create_logger`` returns the same OVOS-configured logger ``LOG.debug``
+#: would have built -- same formatter and handlers -- and registers it in
+#: ``LOG._loggers``, so ``LOG.init``/``LOG.set_level`` still retargets its
+#: level. Only the per-call stack walk is dropped. Resolved lazily because
+#: ``LOG.init`` usually runs after import.
+_LOOKUP_LOGGER = None
+_LOOKUP_LOGGER_KEY = None
+_LOOKUP_LOGGER_LOCK = threading.Lock()
+
+
+def _lookup_logger():
+    """Return the cached lookup-path logger, rebuilding when LOG rewires.
+
+    Cached against ``(LOG.name, LOG.base_path)``: ``LOG.init()`` normally runs
+    after import, and a logger created before it would carry only the stdout
+    handler -- configured file logging would silently vanish from this path,
+    because init does not rebuild handlers on existing loggers. When the
+    fingerprint changes, the stale entry and its handlers are dropped so
+    ``create_logger`` rebuilds against the live config. The lock keeps two
+    racing admissions from attaching duplicate handlers to the same
+    process-wide ``logging.getLogger`` name.
+    """
+    global _LOOKUP_LOGGER, _LOOKUP_LOGGER_KEY
+    key = (LOG.name, LOG.base_path)
+    if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+        with _LOOKUP_LOGGER_LOCK:
+            if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+                name = f"{LOG.name} - {__name__}"
+                stale = LOG._loggers.pop(name, None)
+                if stale is not None:
+                    for handler in list(stale.handlers):
+                        stale.removeHandler(handler)
+                        handler.close()
+                _LOOKUP_LOGGER = LOG.create_logger(name)
+                _LOOKUP_LOGGER_KEY = key
+    return _LOOKUP_LOGGER
 
 
 def _iter_client_records_safely(db) -> "Iterable[tuple[str, str]]":
@@ -894,11 +935,19 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             List of matching clients
         """
-        LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
+        # Lazy args, and a logger resolved once: this is the admission path.
+        # ``LOG.debug`` walks ``inspect.stack()`` before it checks the level,
+        # so these two lines cost ~1.07 ms per lookup on a node that is not
+        # even running at DEBUG -- more than the Redis round trips they
+        # describe. The walk gets more expensive the deeper the stack, and a
+        # lookup from Core's admission path is deep.
+        log = _lookup_logger()
+        log.debug("Searching for clients by indexed field '%s' with value '%s'",
+                  key, val)
         client_ids = self.redis.smembers(self._key(key, val))
         client_keys = [self._client_key(cid) for cid in client_ids]
         res = self._load_clients(client_keys)
-        LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
+        log.debug("Found %d clients matching '%s=%s'", len(res), key, val)
         return res
 
     def _search_brute_force(self, key: str, val) -> List[Client]:
