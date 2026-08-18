@@ -124,6 +124,16 @@ class RedisDB(AbstractRemoteDB):
     ssl_ca_certs: Optional[str] = None
     ssl_cert_reqs: str = "required"
     ssl_check_hostname: bool = True
+    # Lifetime of the Redis-side per-key admission records (seconds). The
+    # default keeps the historical behaviour. Deployments whose clients
+    # reconnect after long idle gaps -- a fleet waking up, a scheduled
+    # probe -- pay the full authoritative re-resolution (4 commands instead
+    # of 1) for every client whose record expired; raising this trades that
+    # storm-front cost against how long a record orphaned by a LOST
+    # invalidation could linger (every write path still invalidates its
+    # records transactionally -- this expiry is the backstop, not the
+    # mechanism).
+    admission_record_ttl: int = 60
 
 
     def __post_init__(self):
@@ -226,6 +236,13 @@ class RedisDB(AbstractRemoteDB):
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
 
+        if (isinstance(self.admission_record_ttl, bool)
+                or not isinstance(self.admission_record_ttl, int)
+                or self.admission_record_ttl < 1):
+            raise ValueError(
+                f"admission_record_ttl must be a positive integer, got {self.admission_record_ttl}"
+            )
+
     def _base_prefix(self) -> str:
         """Return the active Redis namespace prefix."""
         if self.cluster_hash_tag:
@@ -245,14 +262,16 @@ class RedisDB(AbstractRemoteDB):
     def _api_key_index_key(self, api_key: str) -> str:
         return self._key("api_key", api_key)
 
-    #: How long a cached admission record may outlive an invalidation it
-    #: raced with. A refill reads the authoritative record and then writes the
-    #: cache; an update landing between those two steps would otherwise be
-    #: undone by the refill and persist until the next write or ``sync()``.
-    #: The window is sub-millisecond and the expiry bounds what a lost race
-    #: can cost, so a revoked or demoted client cannot stay admitted.
-    #: ``SET ... EX`` is used rather than ``HEXPIRE`` because that needs Redis
-    #: 7.4 and this backend only declares ``redis>=4.2.0``.
+    #: Historical default for :attr:`admission_record_ttl`, kept so existing
+    #: references keep working. How long a cached admission record may outlive
+    #: an invalidation it raced with: a refill reads the authoritative record
+    #: and then writes the cache; an update landing between those two steps
+    #: would otherwise be undone by the refill and persist until the next
+    #: write or ``sync()``. The window is sub-millisecond and the expiry
+    #: bounds what a lost race can cost, so a revoked or demoted client
+    #: cannot stay admitted. ``SET ... EX`` is used rather than ``HEXPIRE``
+    #: because that needs Redis 7.4 and this backend only declares
+    #: ``redis>=4.2.0``.
     ADMISSION_CACHE_TTL = 60
 
     def _api_key_record_key(self, api_key: str) -> str:
@@ -1083,7 +1102,7 @@ class RedisDB(AbstractRemoteDB):
         if client is not None and client.api_key == api_key:
             try:
                 self.redis.set(record_key, client.serialize(),
-                               ex=self.ADMISSION_CACHE_TTL)
+                               ex=self.admission_record_ttl)
             except Exception as e:
                 LOG.warning(f"Admission cache refill failed: {e}")
         return client
