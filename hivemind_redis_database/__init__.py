@@ -124,6 +124,17 @@ class RedisDB(AbstractRemoteDB):
     ssl_ca_certs: Optional[str] = None
     ssl_cert_reqs: str = "required"
     ssl_check_hostname: bool = True
+    # Opt-in in-process TTL cache in FRONT of the Redis-side admission
+    # records: even a single-GET admission costs a client-observed round trip
+    # under storm (~60ms measured at 400 concurrent clients on a shared
+    # Redis whose server-side GET cost was 6.2us -- the cost is in-process
+    # scheduling, not the server). Identity records change only through
+    # explicit operator actions. SECURITY TRADE-OFF: a revoke/update becomes
+    # effective on OTHER hub processes only after this TTL expires (this
+    # process invalidates immediately) -- keep the TTL small (seconds).
+    # 0 disables the cache (default).
+    api_key_cache_ttl: float = 0.0
+    api_key_cache_size: int = 2048
 
 
     def __post_init__(self):
@@ -132,6 +143,13 @@ class RedisDB(AbstractRemoteDB):
         """
         self._normalize_parameters()
         self._validate_parameters()
+        self._api_key_cache: dict = {}
+        self._api_key_cache_lock = threading.Lock()
+        # Bumped by every invalidation. A lookup snapshots the generation
+        # BEFORE reading Redis and the store is dropped if it changed, so an
+        # in-flight read that overlapped a mutation can never re-cache the
+        # pre-mutation value.
+        self._api_key_cache_gen = 0
         LOG.info("Redis database initialized with hiredis for optimal performance")
 
         self.is_cluster = self._detect_cluster()
@@ -226,6 +244,16 @@ class RedisDB(AbstractRemoteDB):
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
 
+        if not isinstance(self.api_key_cache_ttl, (int, float)) or self.api_key_cache_ttl < 0:
+            raise ValueError(
+                f"api_key_cache_ttl must be a non-negative number, got {self.api_key_cache_ttl}"
+            )
+
+        if not isinstance(self.api_key_cache_size, int) or self.api_key_cache_size < 1:
+            raise ValueError(
+                f"api_key_cache_size must be a positive integer, got {self.api_key_cache_size}"
+            )
+
     def _base_prefix(self) -> str:
         """Return the active Redis namespace prefix."""
         if self.cluster_hash_tag:
@@ -244,6 +272,63 @@ class RedisDB(AbstractRemoteDB):
 
     def _api_key_index_key(self, api_key: str) -> str:
         return self._key("api_key", api_key)
+
+    def _api_key_cache_gen_snapshot(self) -> int:
+        """Generation token to pass to ``_api_key_cache_store``.
+
+        Snapshot BEFORE reading Redis: if any invalidation lands between the
+        snapshot and the store, the store is dropped rather than re-caching a
+        value read before the mutation committed.
+        """
+        if self.api_key_cache_ttl <= 0:
+            return 0
+        with self._api_key_cache_lock:
+            return self._api_key_cache_gen
+
+    def _api_key_cache_get(self, api_key: str):
+        """Return (hit, client) from the in-process TTL cache."""
+        if self.api_key_cache_ttl <= 0:
+            return False, None
+        with self._api_key_cache_lock:
+            entry = self._api_key_cache.get(api_key)
+            if entry is None:
+                return False, None
+            ts, client = entry
+            if time.monotonic() - ts >= self.api_key_cache_ttl:
+                self._api_key_cache.pop(api_key, None)
+                return False, None
+            return True, client
+
+    def _api_key_cache_store(self, api_key: str, client, gen: int) -> None:
+        if self.api_key_cache_ttl <= 0:
+            return
+        with self._api_key_cache_lock:
+            if gen != self._api_key_cache_gen:
+                return
+            if api_key not in self._api_key_cache and (
+                len(self._api_key_cache) >= self.api_key_cache_size
+            ):
+                self._api_key_cache.clear()
+            self._api_key_cache[api_key] = (time.monotonic(), client)
+
+    def _api_key_cache_invalidate(self, api_key=None) -> None:
+        """Drop one key (or everything) from the in-process TTL cache.
+
+        Must run AFTER the corresponding Redis write commits: the Redis-side
+        record rides the mutation's transaction via
+        ``_invalidate_api_key_records(writer=...)``, but this in-process layer
+        cannot, so call sites invalidate it right after ``p.execute()``. Also
+        bumps the cache generation so an in-flight lookup that read Redis
+        before the commit cannot store its stale result afterwards.
+        """
+        if self.api_key_cache_ttl <= 0:
+            return
+        with self._api_key_cache_lock:
+            self._api_key_cache_gen += 1
+            if api_key is None:
+                self._api_key_cache.clear()
+            else:
+                self._api_key_cache.pop(str(api_key), None)
 
     #: How long a cached admission record may outlive an invalidation it
     #: raced with. A refill reads the authoritative record and then writes the
@@ -286,6 +371,13 @@ class RedisDB(AbstractRemoteDB):
                 # admitted, so this must be loud even though it is survivable
                 # (the record expires within ADMISSION_CACHE_TTL).
                 LOG.error(f"Failed to invalidate admission cache: {e}")
+        if writer is None:
+            # Immediate mode: the deletes above have committed, so the
+            # in-process layer can be dropped here too. Pipeline callers
+            # invalidate it themselves after ``p.execute()``.
+            for api_key in api_keys:
+                if api_key:
+                    self._api_key_cache_invalidate(api_key)
 
     def _search_doc_key(self, client_id: Union[str, int]) -> str:
         return self._key("idx", client_id)
@@ -745,7 +837,10 @@ class RedisDB(AbstractRemoteDB):
             p.incr(self._counter_key())
             self._invalidate_api_key_records(client.api_key, writer=p)
             p.execute()
-            
+            # After commit: the in-process layer cannot ride the transaction,
+            # and a cached negative lookup must not outlive the new key.
+            self._api_key_cache_invalidate(client.api_key)
+
             LOG.debug(f"Successfully added client '{client.client_id}'")
             return True
         except Exception as e:
@@ -819,6 +914,10 @@ class RedisDB(AbstractRemoteDB):
             self._invalidate_api_key_records(old_api_key, writer=p)
 
             p.execute()
+            # After commit, never before: invalidating the in-process layer
+            # pre-commit would let a concurrent lookup re-cache the
+            # still-unrevoked value.
+            self._api_key_cache_invalidate(old_api_key)
 
             LOG.info(f"Successfully revoked client '{client_id}'")
             return True
@@ -906,6 +1005,10 @@ class RedisDB(AbstractRemoteDB):
                 old_client.api_key, client.api_key, writer=p)
 
             p.execute()
+            # After commit (see remove_client). Both keys, even when equal:
+            # a same-key update still rewrites the record.
+            self._api_key_cache_invalidate(old_client.api_key)
+            self._api_key_cache_invalidate(client.api_key)
             LOG.debug(f"Successfully updated client '{client.client_id}'")
             return True
         except Exception as e:
@@ -1053,6 +1156,11 @@ class RedisDB(AbstractRemoteDB):
             # behaviour rather than adding a second consistency surface.
             return self._authoritative_client_by_api_key(api_key)
 
+        hit, cached = self._api_key_cache_get(api_key)
+        if hit:
+            return cached
+        cache_gen = self._api_key_cache_gen_snapshot()
+
         record_key = self._api_key_record_key(api_key)
         # The cache is derived state, so every failure below degrades to the
         # authoritative lookup. A broken cache must never refuse a client the
@@ -1073,6 +1181,7 @@ class RedisDB(AbstractRemoteDB):
             # A record that no longer carries this key was rotated behind our
             # back. Never admit on it.
             if client is not None and client.api_key == api_key:
+                self._api_key_cache_store(api_key, client, cache_gen)
                 return client
             try:
                 self.redis.delete(record_key)
@@ -1086,6 +1195,12 @@ class RedisDB(AbstractRemoteDB):
                                ex=self.ADMISSION_CACHE_TTL)
             except Exception as e:
                 LOG.warning(f"Admission cache refill failed: {e}")
+        # Cache the outcome in-process too -- including a miss: unknown or
+        # revoked keys hammered by a reconnect storm must also be absorbed,
+        # and caching None is deny-side, so it is safe. A record whose key no
+        # longer matches is never cached under this key.
+        if client is None or client.api_key == api_key:
+            self._api_key_cache_store(api_key, client, cache_gen)
         return client
 
     def search_by_value(self, key: str, val) -> List[Client]:
@@ -1168,6 +1283,9 @@ class RedisDB(AbstractRemoteDB):
                     })
 
             p.execute()
+            # Full-rebuild committed: drop the whole in-process cache after,
+            # not before, so no lookup can re-cache pre-rebuild state mid-sync.
+            self._api_key_cache_invalidate()
             LOG.info(f"Redis database sync complete for '{self.index_prefix}' ({len(client_records)} clients)")
             return True
         except Exception as e:
