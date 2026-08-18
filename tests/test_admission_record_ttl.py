@@ -37,7 +37,7 @@ class TestAdmissionRecordTTL(unittest.TestCase):
     def test_validated_as_positive_integer(self):
         db = _db()
         db._validate_parameters()  # default passes
-        for bad in (0, -5, 1.5, "60"):
+        for bad in (0, -5, 1.5, "60", True):
             db.admission_record_ttl = bad
             with self.assertRaises(ValueError):
                 db._validate_parameters()

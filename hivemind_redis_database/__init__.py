@@ -236,7 +236,9 @@ class RedisDB(AbstractRemoteDB):
         if self.ssl_cert_reqs not in ["required", "optional", "none"]:
             raise ValueError(f"ssl_cert_reqs must be 'required', 'optional', or 'none', got {self.ssl_cert_reqs}")
 
-        if not isinstance(self.admission_record_ttl, int) or self.admission_record_ttl < 1:
+        if (isinstance(self.admission_record_ttl, bool)
+                or not isinstance(self.admission_record_ttl, int)
+                or self.admission_record_ttl < 1):
             raise ValueError(
                 f"admission_record_ttl must be a positive integer, got {self.admission_record_ttl}"
             )
