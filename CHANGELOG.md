@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1a6](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a6) (2026-09-02)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a5...0.1.1a6)
+
+**Merged pull requests:**
+
+- test: fix e2e cache-invalidation helper to call invalidate\_user [\#53](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/53) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.1.1a5](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a5) (2026-08-15)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a4...0.1.1a5)
