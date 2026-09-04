@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1a7](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a7) (2026-09-04)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a6...0.1.1a7)
+
+**Merged pull requests:**
+
+- refactor: drop the dead crypto\_key column/field [\#55](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/55) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [0.1.1a6](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a6) (2026-09-02)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a5...0.1.1a6)
