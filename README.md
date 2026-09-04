@@ -1,6 +1,10 @@
-# HiveMind Redis Database
+# hivemind-redis-database
 
-Redis-backed client database plugin for HiveMind-core.
+Redis-backed client database plugin for [hivemind-core](https://github.com/JarbasHiveMind/HiveMind-core).
+
+This plugin implements the [`hivemind-plugin-manager`](https://github.com/JarbasHiveMind/hivemind-plugin-manager)
+`AbstractDB` contract on top of Redis. Use it for multi-host fleets, high-availability setups,
+and deployments where several hivemind-core processes share one database.
 
 It supports:
 
@@ -8,7 +12,7 @@ It supports:
 - Redis Cluster
 - optional TLS
 - optional RediSearch / Redis Stack acceleration
-- transactional same-slot writes in cluster mode via `cluster_hash_tag`
+- transactional same-slot writes in cluster mode through `cluster_hash_tag`
 - repair and migration tooling for production rollouts
 
 ## Why This Backend
@@ -22,7 +26,7 @@ Key operational points:
   at a live node
 - it uses RediSearch when the module is available, and falls back to normal
   Redis indexing when it is not
-- it keeps exact-match search semantics even when RediSearch is enabled
+- it keeps exact-match search semantics whether or not RediSearch is enabled
 - it hides revoked clients from iteration and search results
 - it exposes `sync()` to rebuild counters, set indexes, and search hashes after
   interrupted writes or manual Redis changes
@@ -38,22 +42,22 @@ Compatibility:
 - Python 3.10+
 - Redis for single-instance mode
 - Redis Cluster for cluster mode
-- Redis Stack or Redis with the RediSearch module loaded for advanced search
+- Redis Stack, or Redis with the RediSearch module loaded, for advanced search
 
 ## Deployment Modes
 
 | Mode | Use when | Notes |
 | --- | --- | --- |
 | Single Redis | You want the simplest production setup | Supports `db`, TLS, RediSearch, and normal Redis indexing |
-| Redis Cluster, legacy mode | You already have an existing cluster namespace | Compatible with current key layout; primary records remain authoritative and `name` / `api_key` search falls back to scans |
+| Redis Cluster, legacy mode | You already have an existing cluster namespace | Compatible with the current key layout; primary records stay authoritative and `name` / `api_key` search falls back to scans |
 | Redis Cluster with `cluster_hash_tag` | New cluster deployments | Recommended mode; keeps all keys for one namespace in one slot and enables transactional cluster pipelines |
 | Redis Stack / RediSearch | You want faster indexed search on `name` and `api_key` | Optional; fallback indexing still works without it |
 
 Recommendation:
 
-- single Redis deployments: straightforward upgrade, no migration needed
+- single Redis deployments: upgrade directly, no migration needed
 - new Redis Cluster deployments: enable `cluster_hash_tag` from day one
-- existing Redis Cluster deployments: upgrade safely on the legacy namespace if
+- existing Redis Cluster deployments: upgrade the legacy namespace first if
   needed, then migrate to `cluster_hash_tag` in a maintenance window
 
 ## HiveMind-core Configuration
@@ -64,9 +68,9 @@ through directly.
 Important note:
 
 - `name` and `subfolder` are part of the HiveMind-core database contract
-- `index_prefix` controls the actual Redis key namespace used by this backend
-- `subfolder` is accepted for compatibility, but it does not affect Redis keys
-  or data layout in this backend
+- `index_prefix` controls the actual Redis key namespace this backend uses
+- this backend accepts `subfolder` for compatibility, but it does not affect
+  Redis keys or data layout
 
 ### Single Redis
 
@@ -133,7 +137,7 @@ If you are staying on legacy cluster mode temporarily, omit
 }
 ```
 
-`ssl` is still accepted as a backward-compatible alias, but `use_ssl` is the
+`ssl` still works as a backward-compatible alias, but `use_ssl` is the
 preferred config key in new docs and new deployments.
 
 If your HiveMind-core config already includes `subfolder`, you can leave it
@@ -150,10 +154,10 @@ there. This backend accepts it, but does not use it for Redis namespacing.
 | `db` | Redis DB number for single-node mode | Default: `0`; ignored in cluster mode |
 | `username` | Redis ACL username | Default: `"default"` |
 | `password` | Redis password | Optional |
-| `index_prefix` | Actual Redis namespace prefix used by this backend | Default: `"client"` |
+| `index_prefix` | Actual Redis namespace prefix this backend uses | Default: `"client"` |
 | `cluster_nodes` | Explicit Redis Cluster startup nodes | Accepts the documented `[{\"host\": ..., \"port\": ...}]` shape |
 | `cluster_hash_tag` | Fixed hash tag for one-slot transactional writes in cluster mode | Recommended for new cluster deployments |
-| `max_connections` | Redis connection pool size | Default: `5` |
+| `max_connections` | Redis connection pool size | Default: `50` |
 | `retry_attempts` | Internal retry attempts for transient operations | Default: `3` |
 | `retry_delay` | Delay between retry attempts | Default: `0.1` seconds |
 | `use_ssl` | Enable TLS | Default: `false` |
@@ -172,9 +176,9 @@ there. This backend accepts it, but does not use it for Redis namespacing.
 - In legacy Redis Cluster mode without `cluster_hash_tag`, the backend treats
   primary client records as authoritative and falls back to scan-based search
   for correctness.
-- Search remains exact-match. RediSearch is used as an accelerator, not as fuzzy
+- Search stays exact-match. RediSearch works as an accelerator, not as fuzzy
   search.
-- Revoked clients are excluded from iteration and search results so HiveMind
+- Revoked clients are excluded from iteration and search results, so HiveMind
   admin flows only see active clients.
 - `sync()` repairs drift by rebuilding counters, Redis set indexes, and
   RediSearch hash documents from stored client records.
@@ -230,7 +234,7 @@ Safe rollout:
 3. Run a dry run to confirm the source and target namespaces.
 4. Run the migration tool to copy records into the tagged namespace.
 5. Update `server.json` to set `cluster_hash_tag`.
-6. Restart HiveMind and smoke-test add, get, update, revoke, and search flows.
+6. Restart HiveMind and test the add, get, update, revoke, and search flows.
 7. Keep the legacy namespace for rollback until the new deployment is stable.
 
 Dry run:
@@ -254,21 +258,46 @@ hivemind-redis-migrate-cluster \
 Notes:
 
 - `--clear-target` clears keys in the target namespace before copying
-- `--source-cluster-hash-tag` is available if you are migrating from one tagged
-  namespace to another
-- the migration tool copies raw client records and then runs `sync()` on the
+- `--source-cluster-hash-tag` lets you migrate from one tagged namespace to
+  another
+- the migration tool copies raw client records, then runs `sync()` on the
   target namespace
 
-More detail is in [docs/cluster_consistency.md](docs/cluster_consistency.md).
+See [docs/cluster_consistency.md](docs/cluster_consistency.md) for more detail.
 
 Legacy Redis Cluster note:
 
-- this mode is now correctness-first rather than index-first
+- this mode is correctness-first rather than index-first
 - primary client records are written directly
 - `name` / `api_key` searches fall back to scans
 - RediSearch acceleration is disabled
-- `cluster_hash_tag` remains the recommended production mode for indexed,
+- `cluster_hash_tag` stays the recommended production mode for indexed,
   transactional cluster behavior
+
+## Where it fits
+
+```
+hivemind-core
+  └── hivemind-plugin-manager  (DatabaseFactory loads plugins by entry-point)
+        └── hivemind-redis-database  ← this repo
+              └── redis-py (Redis / RedisCluster) + optional RediSearch module
+```
+
+The plugin registers under the `hivemind.database` entry-point group as
+`hivemind-redis-db-plugin`.
+
+## Related Projects
+
+- [hivemind-core](https://github.com/JarbasHiveMind/HiveMind-core): the HiveMind server that loads this plugin
+- [hivemind-plugin-manager](https://github.com/JarbasHiveMind/hivemind-plugin-manager): defines the `AbstractDB` contract this plugin implements
+- [hivemind-sqlite-database](https://github.com/JarbasHiveMind/hivemind-sqlite-database): a sibling database plugin, and the source for the plugin-authoring guide
+
+## Docs
+
+- [docs/architecture.md](docs/architecture.md) — key schema, index design, RediSearch, sync()
+- [docs/configuration.md](docs/configuration.md) — full config reference
+- [docs/cluster_consistency.md](docs/cluster_consistency.md) — cluster hash tag, migration plan
+- [docs/operations.md](docs/operations.md) — backup, authoring a plugin
 
 ## Development
 
@@ -286,3 +315,7 @@ CI covers:
 - TLS Redis integration
 - Redis Cluster integration
 - Redis Stack Cluster integration
+
+## License
+
+See [LICENSE](LICENSE).

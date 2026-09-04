@@ -1,17 +1,71 @@
 from dataclasses import dataclass
 from typing import List, Optional, Iterable, Union
 import json
+import threading
 import time
 
 import redis
 from redis.cluster import ClusterNode
 from ovos_utils.log import LOG
 
-from hivemind_plugin_manager.database import Client, AbstractRemoteDB, cast2client
+from hivemind_plugin_manager.database import (Client, AbstractDB,
+                                                AbstractRemoteDB, cast2client)
 
 
 CREATE_MARKER = "__hivemind_creating__"
 CREATE_MARKER_TTL = 30
+
+
+#: Lookup-path logger, resolved once.
+#:
+#: ``LOG.create_logger`` returns the same OVOS-configured logger ``LOG.debug``
+#: would have built -- same formatter and handlers -- and registers it in
+#: ``LOG._loggers``, so ``LOG.init``/``LOG.set_level`` still retargets its
+#: level. Only the per-call stack walk is dropped. Resolved lazily because
+#: ``LOG.init`` usually runs after import.
+_LOOKUP_LOGGER = None
+_LOOKUP_LOGGER_KEY = None
+_LOOKUP_LOGGER_LOCK = threading.Lock()
+
+
+def _lookup_logger():
+    """Return the cached lookup-path logger, rebuilding when LOG rewires.
+
+    Cached against ``(LOG.name, LOG.base_path)``: ``LOG.init()`` normally runs
+    after import, and a logger created before it would carry only the stdout
+    handler -- configured file logging would silently vanish from this path,
+    because init does not rebuild handlers on existing loggers. When the
+    fingerprint changes, the stale entry and its handlers are dropped so
+    ``create_logger`` rebuilds against the live config. The lock keeps two
+    racing admissions from attaching duplicate handlers to the same
+    process-wide ``logging.getLogger`` name.
+    """
+    global _LOOKUP_LOGGER, _LOOKUP_LOGGER_KEY
+    key = (LOG.name, LOG.base_path)
+    if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+        with _LOOKUP_LOGGER_LOCK:
+            if _LOOKUP_LOGGER is None or _LOOKUP_LOGGER_KEY != key:
+                name = f"{LOG.name} - {__name__}"
+                stale = LOG._loggers.pop(name, None)
+                if stale is not None:
+                    for handler in list(stale.handlers):
+                        stale.removeHandler(handler)
+                        handler.close()
+                _LOOKUP_LOGGER = LOG.create_logger(name)
+                _LOOKUP_LOGGER_KEY = key
+    return _LOOKUP_LOGGER
+
+
+def _iter_client_records_safely(db) -> "Iterable[tuple[str, str]]":
+    """Yield (key, raw_value) pairs for every stored client record in the
+    active namespace. Used by ``migrate()`` to rewrite records in place.
+    Skips empties; callers must handle ``CREATE_MARKER`` themselves.
+    """
+    for key in db.redis.scan_iter(db._scan_pattern("client"), count=100):
+        raw = db.redis.get(key)
+        if not raw:
+            continue
+        yield key, raw
 
 
 @dataclass
@@ -41,7 +95,7 @@ class RedisDB(AbstractRemoteDB):
         cluster_nodes (Optional[List[dict]]): Redis Cluster node configuration
         cluster_hash_tag (Optional[str]): Fixed Redis Cluster hash tag for single-slot writes
         index_prefix (str): Key prefix for all database operations (default: "client")
-        max_connections (int): Maximum connection pool size (default: 5)
+        max_connections (int): Maximum connection pool size (default: 50)
         retry_attempts (int): Number of retry attempts (default: 3)
         retry_delay (float): Delay between retry attempts in seconds (default: 0.1)
         use_ssl (bool): Enable SSL/TLS connection (default: False)
@@ -60,7 +114,7 @@ class RedisDB(AbstractRemoteDB):
     cluster_nodes: Optional[List[dict]] = None
     cluster_hash_tag: Optional[str] = None
     index_prefix: str = "client"
-    max_connections: int = 5
+    max_connections: int = 50
     retry_attempts: int = 3
     retry_delay: float = 0.1
     use_ssl: bool = False
@@ -114,6 +168,8 @@ class RedisDB(AbstractRemoteDB):
         if not self.health_check():
             LOG.error("Redis connection health check failed during initialization")
             raise redis.ConnectionError("Failed to establish healthy Redis connection")
+
+        self._maybe_migrate()
 
     def _normalize_parameters(self):
         """Normalize optional parameters and backward-compatible aliases."""
@@ -189,11 +245,56 @@ class RedisDB(AbstractRemoteDB):
     def _api_key_index_key(self, api_key: str) -> str:
         return self._key("api_key", api_key)
 
+    #: How long a cached admission record may outlive an invalidation it
+    #: raced with. A refill reads the authoritative record and then writes the
+    #: cache; an update landing between those two steps would otherwise be
+    #: undone by the refill and persist until the next write or ``sync()``.
+    #: The window is sub-millisecond and the expiry bounds what a lost race
+    #: can cost, so a revoked or demoted client cannot stay admitted.
+    #: ``SET ... EX`` is used rather than ``HEXPIRE`` because that needs Redis
+    #: 7.4 and this backend only declares ``redis>=4.2.0``.
+    ADMISSION_CACHE_TTL = 60
+
+    def _api_key_record_key(self, api_key: str) -> str:
+        """Key holding the serialized client for ``api_key``.
+
+        One expiring key per live API key, never the source of truth: every
+        write path drops the keys it affects and the next lookup rebuilds
+        them from the authoritative record.
+        """
+        return self._key("api_key_record", api_key)
+
+    def _invalidate_api_key_records(self, *api_keys, writer=None) -> None:
+        """Drop cached admission records for ``api_keys``.
+
+        ``writer`` lets a caller fold this into an existing pipeline so the
+        invalidation lands in the same transaction as the write that caused
+        it. Skipped in legacy cluster mode, which never populates the cache.
+        """
+        if self._legacy_cluster_mode():
+            return
+        target = writer if writer is not None else self.redis
+        for api_key in api_keys:
+            if not api_key:
+                continue
+            # One key per call: a multi-key DELETE would be cross-slot on a
+            # cluster without a hash tag.
+            try:
+                target.delete(self._api_key_record_key(str(api_key)))
+            except Exception as e:
+                # Losing an invalidation would leave a stale credential
+                # admitted, so this must be loud even though it is survivable
+                # (the record expires within ADMISSION_CACHE_TTL).
+                LOG.error(f"Failed to invalidate admission cache: {e}")
+
     def _search_doc_key(self, client_id: Union[str, int]) -> str:
         return self._key("idx", client_id)
 
     def _counter_key(self) -> str:
         return self._key("count")
+
+    def _schema_version_key(self) -> str:
+        return self._key("schema_version")
 
     def _id_sequence_key(self) -> str:
         return self._key("id_seq")
@@ -207,9 +308,19 @@ class RedisDB(AbstractRemoteDB):
         return f"{self._key(*parts)}:*"
 
     def _pipeline(self):
-        if getattr(self, "is_cluster", False) and self.cluster_hash_tag:
-            return self.redis.pipeline(transaction=True)
-        return self.redis.pipeline()
+        """Return a pipeline appropriate for the current Redis topology.
+
+        Single-node Redis: transactional (MULTI/EXEC) so ``add_item`` /
+        ``update_client`` multi-key writes land atomically. Cluster with
+        a hash-tag namespace: transactional within the single slot.
+        Legacy cluster mode (no hash tag) cannot do multi-key MULTI/EXEC
+        across slots, so the pipeline is non-transactional there.
+        """
+        if getattr(self, "is_cluster", False):
+            if self.cluster_hash_tag:
+                return self.redis.pipeline(transaction=True)
+            return self.redis.pipeline()
+        return self.redis.pipeline(transaction=True)
 
     def _legacy_cluster_mode(self) -> bool:
         """Return True when running on Redis Cluster without a hash-tag namespace."""
@@ -454,6 +565,107 @@ class RedisDB(AbstractRemoteDB):
         except TypeError:
             return bool(self.redis.setnx(item_key, CREATE_MARKER))
 
+    def _maybe_migrate(self) -> None:
+        """Run schema migration if the stored namespace version is behind
+        ``SCHEMA_VERSION``.
+
+        The version is stored at a per-namespace key ``{prefix}:schema_version``
+        so multi-hub deployments using ``index_prefix``/``cluster_hash_tag``
+        each track their own migration state. Tolerates older HPM that
+        predates ``SCHEMA_VERSION`` by falling back to ``1``.
+        """
+        target = getattr(AbstractDB, "SCHEMA_VERSION", 1)
+        try:
+            raw = self.redis.get(self._schema_version_key())
+            stored = int(raw) if raw is not None else 1
+        except (ValueError, TypeError):
+            stored = 1
+        # Tolerate older HPM that predates the forward-compat guard, the
+        # same way SCHEMA_VERSION is read defensively above.
+        if hasattr(self, "_check_forward_compat"):
+            self._check_forward_compat(stored)
+        if stored < target:
+            LOG.info("RedisDB: migrating namespace '%s' schema v%d -> v%d",
+                     self._base_prefix(), stored, target)
+            # Bundle the per-record rewrites and the schema sentinel SET
+            # into one MULTI/EXEC so they land atomically — a crash can
+            # never leave the namespace in a "rows migrated but stale
+            # sentinel" (or vice versa) state.
+            try:
+                pipe = self.redis.pipeline(transaction=True)
+            except Exception:
+                pipe = None
+            if pipe is None:
+                self.migrate(from_version=stored)
+                self.redis.set(self._schema_version_key(), int(target))
+            else:
+                self._migrate_into_pipeline(pipe, from_version=stored)
+                pipe.set(self._schema_version_key(), int(target))
+                pipe.execute()
+
+    def migrate(self, from_version: int) -> None:
+        """Migrate stored client records to the current ``SCHEMA_VERSION``.
+
+        Idempotent and crash-safe: a partial migration re-run produces
+        the same final state. A row that has already been migrated has
+        no top-level legacy keys, so the per-row update is a no-op.
+
+        v1 -> v2: fold each record's top-level ``intent_blacklist`` /
+        ``skill_blacklist`` JSON values into the record's ``metadata``
+        dict (``setdefault`` — explicit metadata values are never
+        clobbered), then remove the legacy top-level keys.
+        ``message_blacklist`` is purged outright (the field is not
+        part of the ``Client`` data model); any residual
+        ``metadata["message_blacklist"]`` from a prior migration run
+        is also stripped.
+        """
+        self._migrate_into_pipeline(self.redis, from_version=from_version)
+
+    def _migrate_into_pipeline(self, writer, from_version: int) -> None:
+        """Internal migration loop that issues writes through ``writer``
+        (either ``self.redis`` for a non-transactional pass or a
+        ``Redis.pipeline(transaction=True)`` so the rewrites and the
+        schema sentinel land atomically). ``writer`` must expose a
+        ``.set(key, value)`` method — both ``Redis`` and ``Pipeline``
+        do."""
+        if from_version >= 2:
+            return
+        legacy_keys = ("intent_blacklist", "skill_blacklist")
+        for key, raw in _iter_client_records_safely(self):
+            if raw == CREATE_MARKER:
+                continue
+            try:
+                record = json.loads(raw)
+            except (TypeError, ValueError) as e:
+                LOG.warning("RedisDB migrate v2: skipping unparseable record "
+                            "at %s: %s", key, e)
+                continue
+            if not isinstance(record, dict):
+                continue
+            metadata = record.get("metadata") if isinstance(
+                record.get("metadata"), dict) else {}
+            changed = False
+            # Strip message_blacklist outright (top-level + metadata).
+            if "message_blacklist" in record:
+                record.pop("message_blacklist", None)
+                changed = True
+            if metadata.pop("message_blacklist", None) is not None:
+                changed = True
+            for lk in legacy_keys:
+                if lk in record:
+                    val = record.pop(lk)
+                    changed = True
+                    if val and lk not in metadata:
+                        metadata[lk] = list(val) if isinstance(
+                            val, (list, tuple)) else val
+            if changed:
+                record["metadata"] = metadata
+                try:
+                    writer.set(key, json.dumps(record))
+                except Exception as e:
+                    LOG.error("RedisDB migrate v2: failed to rewrite %s: %s",
+                              key, e)
+
     def add_item(self, client: Client) -> bool:
         """
         Add a new client to the Redis database or update existing client.
@@ -531,6 +743,7 @@ class RedisDB(AbstractRemoteDB):
                 "api_key": client.api_key,
             })
             p.incr(self._counter_key())
+            self._invalidate_api_key_records(client.api_key, writer=p)
             p.execute()
             
             LOG.debug(f"Successfully added client '{client.client_id}'")
@@ -575,12 +788,13 @@ class RedisDB(AbstractRemoteDB):
             data = json.loads(client_data)
             old_name = data.get('name', '')
             old_api_key = data.get('api_key', '')
+            if not isinstance(data.get("metadata"), dict):
+                data["metadata"] = {}
 
             # Revoke credentials
             data['name'] = ""
             data['api_key'] = "revoked"
             data['password'] = None
-            data['crypto_key'] = None
 
             if self._legacy_cluster_mode():
                 self.redis.set(item_key, json.dumps(data))
@@ -599,6 +813,9 @@ class RedisDB(AbstractRemoteDB):
                 "name": "",
                 "api_key": "revoked",
             })
+            # Revocation must take effect on the next admission, not on the
+            # next sync: drop the cached record in the same transaction.
+            self._invalidate_api_key_records(old_api_key, writer=p)
 
             p.execute()
 
@@ -612,15 +829,34 @@ class RedisDB(AbstractRemoteDB):
             return False
 
     def _ensure_client_attributes(self, client: Client):
+        """Replace explicit-None list fields with []. Needed for legacy records
+        where a list column was stored as ``null``: ``Client(intent_blacklist=None)``
+        keeps None (``default_factory`` only fires when the kwarg is omitted).
+        ``metadata`` is handled by ``Client.__post_init__`` (>=0.5.0).
         """
-        Ensure client has required attributes initialized.
-
-        Args:
-            client: The client object to initialize attributes for
-        """
-        for attr in ['message_blacklist', 'intent_blacklist', 'skill_blacklist']:
-            if not hasattr(client, attr) or getattr(client, attr) is None:
+        # message_blacklist is no longer part of the Client data model.
+        for attr in ('intent_blacklist', 'skill_blacklist'):
+            if getattr(client, attr, None) is None:
                 setattr(client, attr, [])
+
+    @staticmethod
+    def _deserialize_client(client_data) -> Client:
+        """Pre-clean a stored record before handing it to ``cast2client``.
+
+        ``Client.deserialize`` raises ``TypeError`` if ``metadata`` is present
+        but not a dict (intentional in plugin-manager >=0.5.0). Records written
+        before metadata existed have no ``metadata`` key — they're handled by
+        Client's default factory. Records hand-edited or written by buggy
+        callers may carry a non-dict ``metadata`` value; coerce those to ``{}``
+        here so a single bad row doesn't break iteration over the DB.
+        """
+        if isinstance(client_data, str):
+            client_data = json.loads(client_data)
+        if isinstance(client_data, dict) and "metadata" in client_data \
+                and not isinstance(client_data["metadata"], dict):
+            client_data = dict(client_data)
+            client_data["metadata"] = {}
+        return cast2client(client_data)
 
     def update_client(self, client: Client) -> bool:
         """
@@ -639,7 +875,7 @@ class RedisDB(AbstractRemoteDB):
                 LOG.warning(f"Client '{client.client_id}' not found for update")
                 return False
 
-            old_client = cast2client(old_client_data)
+            old_client = self._deserialize_client(old_client_data)
             self._ensure_client_attributes(client)
 
             if self._legacy_cluster_mode():
@@ -662,13 +898,49 @@ class RedisDB(AbstractRemoteDB):
                 "name": client.name,
                 "api_key": client.api_key,
             })
-            
+            # Drop both keys: is_admin, allowed_types and password can
+            # change without the API key changing, and admission reads all
+            # of them off this record.
+            self._invalidate_api_key_records(
+                old_client.api_key, client.api_key, writer=p)
+
             p.execute()
             LOG.debug(f"Successfully updated client '{client.client_id}'")
             return True
         except Exception as e:
             LOG.error(f"Failed to update client '{client.client_id}': {e}")
             return False
+
+    def get_client_by_id(self, client_id: int) -> Optional[Client]:
+        """Fetch a single client by primary key with one ``GET``.
+
+        Targeted lookup used by :meth:`refresh` on the admission hot
+        path — avoids any ``scan_iter`` / index walk. Returns ``None``
+        if the key is missing, holds a stale create marker, or fails
+        to deserialize.
+        """
+        if client_id is None:
+            return None
+        try:
+            raw = self.redis.get(self._client_key(client_id))
+        except Exception as e:
+            LOG.error(f"Failed to fetch client {client_id} from Redis: {e}")
+            return None
+        if not raw or raw == CREATE_MARKER:
+            return None
+        try:
+            return self._deserialize_client(raw)
+        except Exception as e:
+            LOG.warning(f"Failed to deserialize client {client_id}: {e}")
+            return None
+
+    def refresh(self, client_id: int) -> Optional[Client]:
+        """Targeted single-key fetch — no global ``sync()``.
+
+        Overrides the base default so the admission chain never triggers
+        a full keyspace scan + index rebuild per inbound message.
+        """
+        return self.get_client_by_id(client_id)
 
     def _search_with_redisearch(self, key: str, val: str) -> List[Client]:
         """
@@ -713,11 +985,19 @@ class RedisDB(AbstractRemoteDB):
         Returns:
             List of matching clients
         """
-        LOG.debug(f"Searching for clients by indexed field '{key}' with value '{val}'")
+        # Lazy args, and a logger resolved once: this is the admission path.
+        # ``LOG.debug`` walks ``inspect.stack()`` before it checks the level,
+        # so these two lines cost ~1.07 ms per lookup on a node that is not
+        # even running at DEBUG -- more than the Redis round trips they
+        # describe. The walk gets more expensive the deeper the stack, and a
+        # lookup from Core's admission path is deep.
+        log = _lookup_logger()
+        log.debug("Searching for clients by indexed field '%s' with value '%s'",
+                  key, val)
         client_ids = self.redis.smembers(self._key(key, val))
         client_keys = [self._client_key(cid) for cid in client_ids]
         res = self._load_clients(client_keys)
-        LOG.debug(f"Found {len(res)} clients matching '{key}={val}'")
+        log.debug("Found %d clients matching '%s=%s'", len(res), key, val)
         return res
 
     def _search_brute_force(self, key: str, val) -> List[Client]:
@@ -737,6 +1017,75 @@ class RedisDB(AbstractRemoteDB):
                 if hasattr(client, key) and getattr(client, key) == val:
                     res.append(client)
         return res
+
+    def _authoritative_client_by_api_key(self, api_key: str) -> Optional[Client]:
+        """Resolve an API key the slow, always-correct way.
+
+        Same route ``AbstractDB.get_client_by_api_key`` takes. Spelled out
+        rather than delegated to ``super()`` so this backend keeps working on
+        its declared ``hivemind-plugin-manager>=0.5.0`` floor, which predates
+        that base method.
+        """
+        matches = self.search_by_value("api_key", api_key)
+        return matches[0] if matches else None
+
+    def get_client_by_api_key(self, api_key: str) -> Optional[Client]:
+        """Return the client for ``api_key``, usually in a single ``HGET``.
+
+        ``AbstractDB`` resolves this through :meth:`search_by_value`, which
+        costs two round trips here — an index or RediSearch lookup for the
+        client id, then a fetch of the record itself. hivemind-core calls this
+        on every connection admission, so the pair is paid per handshake.
+
+        A materialized hash collapses the steady state to one round trip. It
+        is only ever a cache: a hit is accepted only if the stored record still
+        carries the key it was filed under, and every write path invalidates
+        the fields it touches, so a miss simply falls back to the authoritative
+        lookup and refills the hash.
+        """
+        if api_key is None:
+            return None
+        api_key = str(api_key)
+
+        if self._legacy_cluster_mode():
+            # Cross-slot writes are already degraded here; keep the existing
+            # behaviour rather than adding a second consistency surface.
+            return self._authoritative_client_by_api_key(api_key)
+
+        record_key = self._api_key_record_key(api_key)
+        # The cache is derived state, so every failure below degrades to the
+        # authoritative lookup. A broken cache must never refuse a client the
+        # authoritative record would have admitted.
+        try:
+            raw = self.redis.get(record_key)
+        except Exception as e:
+            LOG.warning(f"Admission cache read failed, falling back: {e}")
+            raw = None
+
+        if raw:
+            client = None
+            try:
+                client = self._deserialize_client(raw)
+                self._ensure_client_attributes(client)
+            except Exception as e:
+                LOG.warning(f"Discarding unreadable admission record: {e}")
+            # A record that no longer carries this key was rotated behind our
+            # back. Never admit on it.
+            if client is not None and client.api_key == api_key:
+                return client
+            try:
+                self.redis.delete(record_key)
+            except Exception as e:
+                LOG.warning(f"Failed to drop invalid admission record: {e}")
+
+        client = self._authoritative_client_by_api_key(api_key)
+        if client is not None and client.api_key == api_key:
+            try:
+                self.redis.set(record_key, client.serialize(),
+                               ex=self.ADMISSION_CACHE_TTL)
+            except Exception as e:
+                LOG.warning(f"Admission cache refill failed: {e}")
+        return client
 
     def search_by_value(self, key: str, val) -> List[Client]:
         """
@@ -782,7 +1131,7 @@ class RedisDB(AbstractRemoteDB):
                     self.redis.delete(item_key)
                     continue
                 try:
-                    client = cast2client(client_data)
+                    client = self._deserialize_client(client_data)
                     self._ensure_client_attributes(client)
                     client_records.append(client)
                     max_client_id = max(max_client_id, int(client.client_id))
@@ -793,6 +1142,9 @@ class RedisDB(AbstractRemoteDB):
             for pattern in (
                 self._scan_pattern("name"),
                 self._scan_pattern("api_key"),
+                # sync() repairs drift, and the admission cache is derived
+                # state, so it is dropped here too and rebuilt lazily.
+                self._scan_pattern("api_key_record"),
                 self._scan_pattern("idx"),
             ):
                 index_keys.extend(list(self.redis.scan_iter(pattern, count=100)))
@@ -864,7 +1216,7 @@ class RedisDB(AbstractRemoteDB):
             if not client_data or client_data == CREATE_MARKER:
                 continue
             try:
-                client = cast2client(client_data)
+                client = self._deserialize_client(client_data)
                 if not include_revoked and client.api_key == "revoked":
                     continue
                 self._ensure_client_attributes(client)
