@@ -795,7 +795,6 @@ class RedisDB(AbstractRemoteDB):
             data['name'] = ""
             data['api_key'] = "revoked"
             data['password'] = None
-            data['crypto_key'] = None
 
             if self._legacy_cluster_mode():
                 self.redis.set(item_key, json.dumps(data))
@@ -899,8 +898,8 @@ class RedisDB(AbstractRemoteDB):
                 "name": client.name,
                 "api_key": client.api_key,
             })
-            # Drop both keys: is_admin, allowed_types, password and crypto_key
-            # can change without the API key changing, and admission reads all
+            # Drop both keys: is_admin, allowed_types and password can
+            # change without the API key changing, and admission reads all
             # of them off this record.
             self._invalidate_api_key_records(
                 old_client.api_key, client.api_key, writer=p)
