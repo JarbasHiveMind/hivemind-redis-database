@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.1a8](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a8) (2026-09-07)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a7...0.1.1a8)
+
+**Merged pull requests:**
+
+- Opt-in in-process TTL cache in front of admission records \(rebased from \#51\) [\#57](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/57) ([JarbasAl](https://github.com/JarbasAl))
+- Make the admission-record lifetime configurable [\#52](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/52) ([goldyfruit](https://github.com/goldyfruit))
+- Connection tuning: no idle-PING tax, TCP keepalive, optional orjson [\#50](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/50) ([goldyfruit](https://github.com/goldyfruit))
+
 ## [0.1.1a7](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a7) (2026-09-04)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a6...0.1.1a7)
