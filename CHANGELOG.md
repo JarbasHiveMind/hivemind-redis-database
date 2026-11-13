@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1a9](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a9) (2026-11-13)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a8...0.1.1a9)
+
+**Merged pull requests:**
+
+- Update dependency python to 3.15 [\#59](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/59) ([renovate[bot]](https://github.com/apps/renovate))
+
 ## [0.1.1a8](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a8) (2026-09-07)
 
 [Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a7...0.1.1a8)
@@ -28,7 +36,7 @@
 
 ## [0.1.1a5](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a5) (2026-08-15)
 
-[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a4...0.1.1a5)
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a3...0.1.1a5)
 
 **Merged pull requests:**
 
@@ -36,13 +44,13 @@
 - perf: stop paying for discarded logs on the admission lookup [\#47](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/47) ([goldyfruit](https://github.com/goldyfruit))
 - perf: resolve an API key on admission with one command [\#46](https://github.com/JarbasHiveMind/hivemind-redis-database/pull/46) ([goldyfruit](https://github.com/goldyfruit))
 
-## [0.1.1a4](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a4) (2026-08-10)
-
-[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a3...0.1.1a4)
-
 ## [0.1.1a3](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a3) (2026-08-10)
 
-[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a2...0.1.1a3)
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a4...0.1.1a3)
+
+## [0.1.1a4](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a4) (2026-08-10)
+
+[Full Changelog](https://github.com/JarbasHiveMind/hivemind-redis-database/compare/0.1.1a2...0.1.1a4)
 
 ## [0.1.1a2](https://github.com/JarbasHiveMind/hivemind-redis-database/tree/0.1.1a2) (2026-08-10)
 
