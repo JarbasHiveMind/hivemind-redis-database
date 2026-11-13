@@ -12,15 +12,15 @@ This backend stores one logical client across multiple Redis keys:
 - `client:id_seq`
 
 In Redis Cluster, those keys map to different hash slots by default. Legacy
-cluster mode therefore works, but multi-key writes are not atomic. A failure in
+cluster mode still works, but multi-key writes are not atomic. A failure in
 the middle of `add_item()`, `update_client()`, or `remove_client()` can leave
 indexes or counters temporarily inconsistent.
 
-The backend now has `sync()` to repair drift, but `sync()` is a recovery tool,
-not a transaction boundary.
+`sync()` repairs this drift, but it is a recovery tool, not a transaction
+boundary.
 
-The backend now also supports an optional `cluster_hash_tag` setting. When
-enabled, all keys for that namespace are stored in the same Redis Cluster slot
+The backend also supports an optional `cluster_hash_tag` setting. When
+enabled, all keys for a namespace are stored in the same Redis Cluster slot
 and writes use `RedisCluster.pipeline(transaction=True)`.
 
 ## Smallest Safe Production Migration
@@ -39,16 +39,16 @@ for cluster deployments:
 3. In cluster mode with that tag enabled, the backend uses `RedisCluster.pipeline(transaction=True)`.
 
 Because every key shares the same hash tag, all commands map to the same slot.
-That is the minimum change that allows real Redis Cluster transactions for this
-schema.
+That is the minimum change that allows real Redis Cluster transactions for
+this schema.
 
 ## Why This Is The Right Tradeoff
 
-- The client database is small and metadata-heavy. It does not benefit much from
+- The client database is small and metadata-heavy. It gains little from
   distributing individual index keys across shards.
 - A single-slot namespace keeps the existing schema and query model.
-- The application gets actual atomic updates in cluster mode without inventing a
-  more complex write protocol.
+- The application gets real atomic updates in cluster mode without a more
+  complex write protocol.
 - Recovery and rollback stay simple.
 
 ## Recommended Rollout
@@ -66,7 +66,7 @@ schema.
 
 ## Migration Tool
 
-This repository now ships a helper command:
+This repository ships a helper command:
 
 ```bash
 hivemind-redis-migrate-cluster \
@@ -82,18 +82,22 @@ What it does:
 - skips stale in-progress create markers
 - runs `sync()` on the target namespace to rebuild indexes, counters, and search hashes
 
-Use `--dry-run` first if you want to inspect the plan without writing data.
+Use `--dry-run` first to inspect the plan without writing data.
 
 ## What Not To Do
 
 - Do not try to fake atomicity across cluster slots with ordinary pipelines.
-- Do not use distributed locks here unless there is a much stronger consistency
-  requirement; that adds operational complexity without solving the schema issue.
+- Do not use distributed locks here unless you have a much stronger
+  consistency requirement. Locks add operational complexity without solving
+  the schema issue.
 - Do not switch the default key format in place. That would silently orphan
   existing data.
 
 ## Practical Recommendation
 
 For new cluster deployments, enable `cluster_hash_tag` from the start.
-For existing cluster deployments, migrate deliberately and keep `sync()` as the
-repair path during rollout.
+For existing cluster deployments, migrate deliberately and keep `sync()` as
+the repair path during rollout.
+
+---
+[← Configuration](configuration.md) · [Home](../README.md) · [Operations →](operations.md)
